@@ -185,10 +185,26 @@ def main() -> None:
             workers=args.workers,
         )
         print("Evaluation complete")
+        print(f"Samples: {summary.num_samples}")
         print(f"Test loss: {summary.test_loss:.4f}")
-        print(f"Test acc: {summary.test_acc:.4f}")
+        print(f"Exact label acc: {summary.test_acc:.4f}")
+        print(f"Variety-only acc: {summary.variety_acc:.4f}")
+        if summary.maturity_acc is not None:
+            print(f"Maturity-only acc: {summary.maturity_acc:.4f}")
         print(f"Device: {summary.device}")
         print(f"Checkpoint: {summary.checkpoint_path}")
+        print(f"Summary JSON: {summary.summary_json_path}")
+        print("Interpretation:")
+        for point in summary.interpretation_points:
+            print(f"- {point}")
+        print(f"Friendly outcome: {summary.friendly_outcome}")
+        if summary.top_confusions:
+            print("Top confusions:")
+            for row in summary.top_confusions[:5]:
+                print(
+                    f"- true={row['true_class']} predicted={row['predicted_class']} "
+                    f"count={row['count']}"
+                )
         return
 
     if args.command == "all":

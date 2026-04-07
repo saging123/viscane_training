@@ -4,7 +4,7 @@ import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -28,9 +28,17 @@ class TrainSummary:
 class EvalSummary:
     test_loss: float
     test_acc: float
+    num_samples: int
     classes: list[str]
     checkpoint_path: str
     device: str
+    variety_acc: float
+    maturity_acc: float | None
+    per_class: List[Dict[str, object]]
+    top_confusions: List[Dict[str, object]]
+    friendly_outcome: str
+    interpretation_points: List[str]
+    summary_json_path: str
 
 
 def _decode_class_name(class_name: str) -> Dict[str, str]:
@@ -46,6 +54,33 @@ def _decode_class_name(class_name: str) -> Dict[str, str]:
         "variety": class_name,
         "maturity_status": "",
     }
+
+
+def _friendly_outcome_text(test_acc: float) -> str:
+    if test_acc >= 0.9:
+        return (
+            "Excellent result. The model is highly reliable on this test set and is a "
+            "strong candidate for pilot deployment."
+        )
+    if test_acc >= 0.8:
+        return (
+            "Strong result. The model is performing well, with room to improve edge cases "
+            "and confusing classes."
+        )
+    if test_acc >= 0.7:
+        return (
+            "Promising result. The model has learned useful patterns, but needs more data "
+            "or tuning before production use."
+        )
+    if test_acc >= 0.6:
+        return (
+            "Moderate result. The model is partially useful, but still makes many mistakes. "
+            "Focus on dataset quality and class balance."
+        )
+    return (
+        "Early-stage result. The model is not yet reliable. Prioritize cleaner labeling, "
+        "more samples per class, and improved preprocessing."
+    )
 
 
 def _set_seed(seed: int) -> None:
@@ -296,13 +331,130 @@ def run_evaluation(
     model.to(device)
 
     criterion = nn.CrossEntropyLoss()
-    test_loss, test_acc = _eval_epoch(model, test_dl, device, criterion)
+    model.eval()
+    loss_sum = 0.0
+    num_samples = 0
+    all_preds: List[int] = []
+    all_targets: List[int] = []
+    with torch.no_grad():
+        for images, labels in test_dl:
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            logits = model(images)
+            loss = criterion(logits, labels)
+            batch_size_now = labels.size(0)
+
+            loss_sum += loss.item() * batch_size_now
+            num_samples += batch_size_now
+            all_targets.extend(labels.detach().cpu().tolist())
+            all_preds.extend(torch.argmax(logits, dim=1).detach().cpu().tolist())
+
+    if num_samples == 0:
+        raise ValueError(f"No test samples found in: {test_path}")
+
+    test_loss = loss_sum / num_samples
+    test_acc = float(np.mean(np.array(all_preds) == np.array(all_targets)))
     print(f"Test only | loss={test_loss:.4f} acc={test_acc:.4f}")
+
+    decoded = [_decode_class_name(name) for name in classes]
+    class_support = [0] * len(classes)
+    class_correct = [0] * len(classes)
+    confusion = np.zeros((len(classes), len(classes)), dtype=np.int64)
+
+    variety_correct = 0
+    maturity_correct = 0
+    has_maturity = any(item["maturity_status"] for item in decoded)
+
+    for target_idx, pred_idx in zip(all_targets, all_preds):
+        class_support[target_idx] += 1
+        if target_idx == pred_idx:
+            class_correct[target_idx] += 1
+        confusion[target_idx, pred_idx] += 1
+
+        target_info = decoded[target_idx]
+        pred_info = decoded[pred_idx]
+        if target_info["variety"] == pred_info["variety"]:
+            variety_correct += 1
+        if has_maturity and target_info["maturity_status"] == pred_info["maturity_status"]:
+            maturity_correct += 1
+
+    variety_acc = variety_correct / num_samples
+    maturity_acc = (maturity_correct / num_samples) if has_maturity else None
+
+    per_class: List[Dict[str, object]] = []
+    for idx, class_name in enumerate(classes):
+        support = class_support[idx]
+        correct = class_correct[idx]
+        class_acc = (correct / support) if support > 0 else 0.0
+        info = decoded[idx]
+        per_class.append(
+            {
+                "class_name": class_name,
+                "variety": info["variety"],
+                "maturity_status": info["maturity_status"],
+                "support": support,
+                "correct": correct,
+                "accuracy": class_acc,
+            }
+        )
+
+    confusion_pairs: List[Dict[str, object]] = []
+    for true_idx in range(len(classes)):
+        for pred_idx in range(len(classes)):
+            if true_idx == pred_idx:
+                continue
+            count = int(confusion[true_idx, pred_idx])
+            if count > 0:
+                confusion_pairs.append(
+                    {
+                        "true_class": classes[true_idx],
+                        "predicted_class": classes[pred_idx],
+                        "count": count,
+                    }
+                )
+    confusion_pairs.sort(key=lambda x: int(x["count"]), reverse=True)
+    top_confusions = confusion_pairs[:10]
+
+    interpretation_points = [
+        f"Exact label accuracy (variety + maturity): {test_acc:.2%}",
+        f"Variety-only accuracy: {variety_acc:.2%}",
+    ]
+    if maturity_acc is not None:
+        interpretation_points.append(f"Maturity-only accuracy: {maturity_acc:.2%}")
+    interpretation_points.append(
+        "Check top_confusions to see which classes the model mixes up most often."
+    )
+
+    friendly_outcome = _friendly_outcome_text(test_acc)
+    summary_json_path = ckpt_path.parent / "test_summary.json"
+    summary_payload: Dict[str, object] = {
+        "test_loss": test_loss,
+        "test_acc": test_acc,
+        "num_samples": num_samples,
+        "classes": classes,
+        "checkpoint_path": str(ckpt_path),
+        "device": str(device),
+        "variety_acc": variety_acc,
+        "maturity_acc": maturity_acc,
+        "per_class": per_class,
+        "top_confusions": top_confusions,
+        "friendly_outcome": friendly_outcome,
+        "interpretation_points": interpretation_points,
+    }
+    summary_json_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
 
     return EvalSummary(
         test_loss=test_loss,
         test_acc=test_acc,
+        num_samples=num_samples,
         classes=classes,
         checkpoint_path=str(ckpt_path),
         device=str(device),
+        variety_acc=variety_acc,
+        maturity_acc=maturity_acc,
+        per_class=per_class,
+        top_confusions=top_confusions,
+        friendly_outcome=friendly_outcome,
+        interpretation_points=interpretation_points,
+        summary_json_path=str(summary_json_path),
     )

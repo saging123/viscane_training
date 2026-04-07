@@ -131,6 +131,7 @@ if not os.path.exists(REPO_DIR):
 from sugarcane_variety.colab_compatible import (
     install_requirements,
     mount_drive,
+    print_eval_summary,
     run_all_for_colab,
     test_for_colab,
 )
@@ -166,7 +167,16 @@ eval_result = test_for_colab(
 )
 
 print(eval_result)
+print_eval_summary(eval_result)
 ```
+
+`test` now gives a detailed, interpretation-friendly summary:
+- exact label accuracy (`variety + maturity`)
+- variety-only accuracy
+- maturity-only accuracy (if available)
+- per-class performance in `test_summary.json`
+- top confusion pairs
+- friendly outcome message
 
 For your dataset structure:
 
