@@ -38,6 +38,7 @@ python main.py preprocess \
   --prepared-dir data/prepared \
   --val-ratio 0.15 \
   --test-ratio 0.15 \
+  --label-mode variety_maturity \
   --resize 256 \
   --seed 42
 ```
@@ -54,6 +55,7 @@ use:
 python main.py preprocess-flat \
   --raw-dir raw \
   --processed-dir processed \
+  --label-mode variety_maturity \
   --resize 256
 ```
 
@@ -71,6 +73,16 @@ python main.py train \
   --seed 42
 ```
 
+### Test only (evaluate saved model on test split)
+
+```bash
+python main.py test \
+  --prepared-dir data/prepared \
+  --checkpoint-path artifacts/best_model.pt \
+  --batch-size 32 \
+  --workers 4
+```
+
 ### End-to-end (preprocess + train)
 
 ```bash
@@ -80,6 +92,7 @@ python main.py all \
   --output-dir artifacts \
   --val-ratio 0.15 \
   --test-ratio 0.15 \
+  --label-mode variety_maturity \
   --resize 256 \
   --epochs 25 \
   --batch-size 32 \
@@ -102,8 +115,16 @@ Use the helper file:
 Example Colab cells:
 
 ```python
-!git clone <your-repo-url>
-%cd <your-repo-folder>
+import os
+
+REPO_URL = "<your-repo-url>"
+REPO_DIR = "<your-repo-folder>"
+
+if not os.path.exists(REPO_DIR):
+    !git clone {REPO_URL} {REPO_DIR}
+
+%cd {REPO_DIR}
+!git pull
 ```
 
 ```python
@@ -111,6 +132,7 @@ from sugarcane_variety.colab_compatible import (
     install_requirements,
     mount_drive,
     run_all_for_colab,
+    test_for_colab,
 )
 
 install_requirements("requirements.txt")
@@ -122,6 +144,7 @@ prep, train = run_all_for_colab(
     raw_dir="/content/drive/MyDrive/sugarcane_raw",   # folder-by-variety
     prepared_dir="/content/data/prepared",
     output_dir="/content/drive/MyDrive/sugarcane_artifacts",
+    label_mode="variety_maturity",
     epochs=25,
     batch_size=32,
     image_size=224,
@@ -131,3 +154,31 @@ prep, train = run_all_for_colab(
 print(prep)
 print(train)
 ```
+
+Test again later in Colab (without retraining):
+
+```python
+eval_result = test_for_colab(
+    prepared_dir="/content/data/prepared",
+    checkpoint_path="/content/drive/MyDrive/sugarcane_artifacts/best_model.pt",
+    batch_size=32,
+    workers=2,
+)
+
+print(eval_result)
+```
+
+For your dataset structure:
+
+```text
+raw/
+  variety_1/
+    mature/
+    not_mature/
+  variety_2/
+    mature/
+    not_mature/
+```
+
+set `--label-mode variety_maturity` (or `label_mode="variety_maturity"` in Colab).
+The model trains on combined labels (example: `variety_1__mature`) and metrics include decoded fields for both `variety` and `maturity_status`.

@@ -24,6 +24,30 @@ class TrainSummary:
     checkpoint_path: str
 
 
+@dataclass
+class EvalSummary:
+    test_loss: float
+    test_acc: float
+    classes: list[str]
+    checkpoint_path: str
+    device: str
+
+
+def _decode_class_name(class_name: str) -> Dict[str, str]:
+    if "__" in class_name:
+        variety, maturity = class_name.split("__", 1)
+        return {
+            "class_name": class_name,
+            "variety": variety,
+            "maturity_status": maturity,
+        }
+    return {
+        "class_name": class_name,
+        "variety": class_name,
+        "maturity_status": "",
+    }
+
+
 def _set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -200,6 +224,7 @@ def run_training(
 
     metrics: Dict[str, object] = {
         "classes": classes,
+        "class_label_components": [_decode_class_name(name) for name in classes],
         "best_val_acc": best_val_acc,
         "test_acc": test_acc,
         "epochs": epochs,
@@ -220,3 +245,64 @@ def run_training(
         checkpoint_path=str(best_ckpt),
     )
 
+
+def run_evaluation(
+    prepared_dir: str,
+    checkpoint_path: str,
+    batch_size: int = 32,
+    workers: int = 4,
+) -> EvalSummary:
+    data_dir = Path(prepared_dir).expanduser().resolve()
+    ckpt_path = Path(checkpoint_path).expanduser().resolve()
+
+    test_path = data_dir / "test"
+    if not test_path.exists():
+        raise FileNotFoundError(f"Missing test folder: {test_path}")
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    classes = checkpoint["classes"]
+    image_size = int(checkpoint["image_size"])
+
+    eval_tfms = transforms.Compose(
+        [
+            transforms.Resize(int(image_size * 1.15)),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ]
+    )
+    test_ds = datasets.ImageFolder(test_path, transform=eval_tfms)
+    test_dl = DataLoader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=workers,
+        pin_memory=True,
+    )
+
+    if test_ds.classes != classes:
+        raise ValueError(
+            "Class mismatch between checkpoint and test data.\n"
+            f"Checkpoint classes: {classes}\n"
+            f"Test classes: {test_ds.classes}"
+        )
+
+    model = models.resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, len(classes))
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(device)
+
+    criterion = nn.CrossEntropyLoss()
+    test_loss, test_acc = _eval_epoch(model, test_dl, device, criterion)
+    print(f"Test only | loss={test_loss:.4f} acc={test_acc:.4f}")
+
+    return EvalSummary(
+        test_loss=test_loss,
+        test_acc=test_acc,
+        classes=classes,
+        checkpoint_path=str(ckpt_path),
+        device=str(device),
+    )

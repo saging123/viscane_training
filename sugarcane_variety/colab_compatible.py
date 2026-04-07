@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from sugarcane_variety.preprocess import PreprocessSummary, run_preprocess
-from sugarcane_variety.train import TrainSummary, run_training
+from sugarcane_variety.train import EvalSummary, TrainSummary, run_evaluation, run_training
 
 
 def install_requirements(requirements_path: str = "requirements.txt") -> None:
@@ -32,6 +32,7 @@ def preprocess_for_colab(
     test_ratio: float = 0.15,
     seed: int = 42,
     resize: int | None = 256,
+    label_mode: str = "variety",
 ) -> PreprocessSummary:
     """Run preprocessing with Colab-friendly defaults."""
     return run_preprocess(
@@ -41,6 +42,7 @@ def preprocess_for_colab(
         test_ratio=test_ratio,
         seed=seed,
         image_size=resize,
+        label_mode=label_mode,  # "variety" or "variety_maturity"
     )
 
 
@@ -69,6 +71,21 @@ def train_for_colab(
     )
 
 
+def test_for_colab(
+    prepared_dir: str = "/content/data/prepared",
+    checkpoint_path: str = "/content/artifacts/best_model.pt",
+    batch_size: int = 32,
+    workers: int = 2,
+) -> EvalSummary:
+    """Run test-only evaluation in Colab."""
+    return run_evaluation(
+        prepared_dir=prepared_dir,
+        checkpoint_path=checkpoint_path,
+        batch_size=batch_size,
+        workers=workers,
+    )
+
+
 def run_all_for_colab(
     raw_dir: str,
     prepared_dir: str = "/content/data/prepared",
@@ -83,6 +100,7 @@ def run_all_for_colab(
     image_size: int = 224,
     workers: int = 2,
     seed: int = 42,
+    label_mode: str = "variety",
 ) -> tuple[PreprocessSummary, TrainSummary]:
     """
     End-to-end preprocessing + training wrapper for Colab notebooks.
@@ -94,6 +112,7 @@ def run_all_for_colab(
         test_ratio=test_ratio,
         seed=seed,
         resize=resize,
+        label_mode=label_mode,
     )
 
     train_summary = train_for_colab(
@@ -108,4 +127,3 @@ def run_all_for_colab(
         seed=seed,
     )
     return prep_summary, train_summary
-

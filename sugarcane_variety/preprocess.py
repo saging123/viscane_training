@@ -5,7 +5,7 @@ import random
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Literal
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -48,6 +48,35 @@ def _collect_images(raw_dir: Path) -> Dict[str, List[Path]]:
             "Expected structure: raw_dir/<variety_name>/*.jpg"
         )
     return class_to_images
+
+
+def _collect_images_variety_maturity(raw_dir: Path) -> Dict[str, List[Path]]:
+    class_to_images: Dict[str, List[Path]] = {}
+    for variety_dir in sorted(p for p in raw_dir.iterdir() if p.is_dir()):
+        for maturity_dir in sorted(p for p in variety_dir.iterdir() if p.is_dir()):
+            images = sorted(
+                [p for p in maturity_dir.rglob("*") if p.is_file() and _is_image_file(p)]
+            )
+            if images:
+                class_name = f"{variety_dir.name}__{maturity_dir.name}"
+                class_to_images[class_name] = images
+    if not class_to_images:
+        raise ValueError(
+            f"No images found in '{raw_dir}'. "
+            "Expected structure: raw_dir/<variety_name>/<maturity_status>/*.jpg"
+        )
+    return class_to_images
+
+
+def _collect_images_by_mode(
+    raw_dir: Path,
+    label_mode: Literal["variety", "variety_maturity"],
+) -> Dict[str, List[Path]]:
+    if label_mode == "variety":
+        return _collect_images(raw_dir)
+    if label_mode == "variety_maturity":
+        return _collect_images_variety_maturity(raw_dir)
+    raise ValueError(f"Unsupported label_mode: {label_mode}")
 
 
 def _split_class_items(
@@ -101,6 +130,7 @@ def run_preprocess(
     test_ratio: float = 0.15,
     seed: int = 42,
     image_size: int | None = None,
+    label_mode: Literal["variety", "variety_maturity"] = "variety",
 ) -> PreprocessSummary:
     raw_path = Path(raw_dir).expanduser().resolve()
     out_path = Path(output_dir).expanduser().resolve()
@@ -110,7 +140,7 @@ def run_preprocess(
     if val_ratio < 0 or test_ratio < 0 or (val_ratio + test_ratio) >= 1:
         raise ValueError("Use ratios where val_ratio >= 0, test_ratio >= 0, and sum < 1.")
 
-    class_to_images = _collect_images(raw_path)
+    class_to_images = _collect_images_by_mode(raw_path, label_mode=label_mode)
     rng = random.Random(seed)
 
     if out_path.exists():
@@ -156,6 +186,7 @@ def run_preprocess_flat(
     raw_dir: str,
     output_dir: str,
     image_size: int | None = None,
+    label_mode: Literal["variety", "variety_maturity"] = "variety",
 ) -> FlatPreprocessSummary:
     """
     Validate and preprocess dataset while preserving folder-per-class structure:
@@ -167,7 +198,12 @@ def run_preprocess_flat(
     if not raw_path.exists():
         raise FileNotFoundError(f"Raw dataset path does not exist: {raw_path}")
 
-    class_to_images = _collect_images(raw_path)
+    if label_mode == "variety":
+        class_to_images = _collect_images(raw_path)
+    elif label_mode == "variety_maturity":
+        class_to_images = _collect_images_variety_maturity(raw_path)
+    else:
+        raise ValueError(f"Unsupported label_mode: {label_mode}")
 
     if out_path.exists():
         shutil.rmtree(out_path)
@@ -178,7 +214,11 @@ def run_preprocess_flat(
     class_counts: Dict[str, int] = {}
 
     for class_name, paths in class_to_images.items():
-        dst_dir = out_path / class_name
+        if label_mode == "variety_maturity":
+            variety_name, maturity_name = class_name.split("__", 1)
+            dst_dir = out_path / variety_name / maturity_name
+        else:
+            dst_dir = out_path / class_name
         valid_count = 0
         for src in paths:
             try:

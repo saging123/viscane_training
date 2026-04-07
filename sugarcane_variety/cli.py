@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 
 from sugarcane_variety.preprocess import run_preprocess, run_preprocess_flat
-from sugarcane_variety.train import run_training
+from sugarcane_variety.train import run_evaluation, run_training
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional square resize during preprocessing (e.g., 256).",
     )
+    prep.add_argument(
+        "--label-mode",
+        choices=["variety", "variety_maturity"],
+        default="variety",
+        help="Labeling mode: variety only or variety+maturity.",
+    )
 
     prep_flat = subparsers.add_parser(
         "preprocess-flat",
@@ -44,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Optional square resize (e.g., 256).",
+    )
+    prep_flat.add_argument(
+        "--label-mode",
+        choices=["variety", "variety_maturity"],
+        default="variety",
+        help="Labeling mode: variety only or variety+maturity.",
     )
 
     train = subparsers.add_parser("train", help="Train model on prepared dataset.")
@@ -62,6 +74,16 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--image-size", type=int, default=224, help="Input size.")
     train.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
     train.add_argument("--seed", type=int, default=42, help="Random seed.")
+
+    test = subparsers.add_parser("test", help="Evaluate checkpoint on test split.")
+    test.add_argument("--prepared-dir", required=True, help="Prepared dataset root.")
+    test.add_argument(
+        "--checkpoint-path",
+        default="artifacts/best_model.pt",
+        help="Path to trained checkpoint.",
+    )
+    test.add_argument("--batch-size", type=int, default=32, help="Batch size.")
+    test.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
 
     all_cmd = subparsers.add_parser("all", help="Run preprocess then train.")
     all_cmd.add_argument("--raw-dir", required=True, help="Path to raw dataset root.")
@@ -92,6 +114,12 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument("--image-size", type=int, default=224, help="Input size.")
     all_cmd.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
     all_cmd.add_argument("--seed", type=int, default=42, help="Random seed.")
+    all_cmd.add_argument(
+        "--label-mode",
+        choices=["variety", "variety_maturity"],
+        default="variety",
+        help="Labeling mode for preprocessing.",
+    )
 
     return parser
 
@@ -107,6 +135,7 @@ def main() -> None:
             test_ratio=args.test_ratio,
             seed=args.seed,
             image_size=args.resize,
+            label_mode=args.label_mode,
         )
         print("Preprocess complete")
         print(f"Classes: {len(summary.classes)} -> {summary.classes}")
@@ -122,6 +151,7 @@ def main() -> None:
             raw_dir=args.raw_dir,
             output_dir=args.processed_dir,
             image_size=args.resize,
+            label_mode=args.label_mode,
         )
         print("Preprocess flat complete")
         print(f"Classes: {len(summary.classes)} -> {summary.classes}")
@@ -147,6 +177,20 @@ def main() -> None:
         print(f"Checkpoint: {summary.checkpoint_path}")
         return
 
+    if args.command == "test":
+        summary = run_evaluation(
+            prepared_dir=args.prepared_dir,
+            checkpoint_path=args.checkpoint_path,
+            batch_size=args.batch_size,
+            workers=args.workers,
+        )
+        print("Evaluation complete")
+        print(f"Test loss: {summary.test_loss:.4f}")
+        print(f"Test acc: {summary.test_acc:.4f}")
+        print(f"Device: {summary.device}")
+        print(f"Checkpoint: {summary.checkpoint_path}")
+        return
+
     if args.command == "all":
         prep_summary = run_preprocess(
             raw_dir=args.raw_dir,
@@ -155,6 +199,7 @@ def main() -> None:
             test_ratio=args.test_ratio,
             seed=args.seed,
             image_size=args.resize,
+            label_mode=args.label_mode,
         )
         print(
             f"Preprocess complete | train={prep_summary.train_count} "
