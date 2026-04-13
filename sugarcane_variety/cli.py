@@ -34,6 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="variety",
         help="Labeling mode: variety only or variety+maturity.",
     )
+    prep.add_argument(
+        "--preprocess-device",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="Device for resize preprocessing. 'auto' uses CUDA when available.",
+    )
 
     prep_flat = subparsers.add_parser(
         "preprocess-flat",
@@ -56,6 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["variety", "variety_maturity"],
         default="variety",
         help="Labeling mode: variety only or variety+maturity.",
+    )
+    prep_flat.add_argument(
+        "--preprocess-device",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="Device for resize preprocessing. 'auto' uses CUDA when available.",
     )
 
     train = subparsers.add_parser("train", help="Train model on prepared dataset.")
@@ -120,6 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="variety",
         help="Labeling mode for preprocessing.",
     )
+    all_cmd.add_argument(
+        "--preprocess-device",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="Device for resize preprocessing. 'auto' uses CUDA when available.",
+    )
 
     return parser
 
@@ -136,6 +154,7 @@ def main() -> None:
             seed=args.seed,
             image_size=args.resize,
             label_mode=args.label_mode,
+            preprocess_device=args.preprocess_device,
         )
         print("Preprocess complete")
         print(f"Classes: {len(summary.classes)} -> {summary.classes}")
@@ -152,6 +171,7 @@ def main() -> None:
             output_dir=args.processed_dir,
             image_size=args.resize,
             label_mode=args.label_mode,
+            preprocess_device=args.preprocess_device,
         )
         print("Preprocess flat complete")
         print(f"Classes: {len(summary.classes)} -> {summary.classes}")
@@ -216,6 +236,7 @@ def main() -> None:
             seed=args.seed,
             image_size=args.resize,
             label_mode=args.label_mode,
+            preprocess_device=args.preprocess_device,
         )
         print(
             f"Preprocess complete | train={prep_summary.train_count} "

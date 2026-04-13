@@ -40,8 +40,13 @@ python main.py preprocess \
   --test-ratio 0.15 \
   --label-mode variety_maturity \
   --resize 256 \
+  --preprocess-device auto \
   --seed 42
 ```
+
+`--preprocess-device auto` uses CUDA for resize preprocessing when a GPU is available.
+Use `--preprocess-device cuda` to require GPU, or `--preprocess-device cpu` to force CPU.
+Image validation, file copying, and JPEG writing still use CPU/disk because those steps are I/O-bound.
 
 ### Preprocess to folder-per-variety output (no split)
 
@@ -56,7 +61,8 @@ python main.py preprocess-flat \
   --raw-dir raw \
   --processed-dir processed \
   --label-mode variety_maturity \
-  --resize 256
+  --resize 256 \
+  --preprocess-device auto
 ```
 
 ### Train only (after preprocess)
@@ -72,6 +78,10 @@ python main.py train \
   --workers 4 \
   --seed 42
 ```
+
+During training and testing, resize/crop/flip/color jitter/normalization run on the
+same device as the model. With CUDA available, the repeated per-epoch preprocessing
+uses the GPU instead of your CPU.
 
 ### Test only (evaluate saved model on test split)
 
@@ -94,6 +104,7 @@ python main.py all \
   --test-ratio 0.15 \
   --label-mode variety_maturity \
   --resize 256 \
+  --preprocess-device auto \
   --epochs 25 \
   --batch-size 32 \
   --lr 0.001 \
@@ -106,6 +117,70 @@ python main.py all \
 
 - `artifacts/best_model.pt`: best checkpoint (by validation accuracy)
 - `artifacts/metrics.json`: classes and training metrics
+
+## Serve the Trained Model as a FastAPI API
+
+After training, start the API from the project root:
+
+```bash
+uvicorn sugarcane_variety.api:app --host 0.0.0.0 --port 8000
+```
+
+By default, the API loads:
+
+```text
+artifacts/best_model.pt
+```
+
+To use a different checkpoint:
+
+```bash
+MODEL_CHECKPOINT=/path/to/best_model.pt \
+uvicorn sugarcane_variety.api:app --host 0.0.0.0 --port 8000
+```
+
+Open the interactive docs:
+
+```text
+http://localhost:8000/docs
+```
+
+Useful endpoints:
+
+- `GET /health`: check whether the model loaded.
+- `GET /classes`: list class labels.
+- `POST /predict`: upload one image and get the predicted sugarcane class.
+
+Example prediction request:
+
+```bash
+curl -X POST "http://localhost:8000/predict?top_k=3" \
+  -F "file=@/path/to/sugarcane_leaf.jpg"
+```
+
+Example response:
+
+```json
+{
+  "filename": "sugarcane_leaf.jpg",
+  "prediction": {
+    "class_index": 0,
+    "confidence": 0.94,
+    "class_name": "variety_1__mature",
+    "variety": "variety_1",
+    "maturity_status": "mature"
+  },
+  "top_k": [
+    {
+      "class_index": 0,
+      "confidence": 0.94,
+      "class_name": "variety_1__mature",
+      "variety": "variety_1",
+      "maturity_status": "mature"
+    }
+  ]
+}
+```
 
 ## Google Colab Compatible Usage
 
@@ -146,6 +221,7 @@ prep, train = run_all_for_colab(
     prepared_dir="/content/data/prepared",
     output_dir="/content/drive/MyDrive/sugarcane_artifacts",
     label_mode="variety_maturity",
+    preprocess_device="auto",  # uses Colab GPU when available
     epochs=25,
     batch_size=32,
     image_size=224,

@@ -8,12 +8,17 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torchvision import datasets, models, transforms
+from torchvision.transforms import functional as TF
 from torchvision.models import ResNet18_Weights
+
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
 @dataclass
@@ -96,27 +101,11 @@ def _build_dataloaders(
     batch_size: int,
     workers: int,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, list[str]]:
-    train_tfms = transforms.Compose(
-        [
-            transforms.RandomResizedCrop(image_size, scale=(0.75, 1.0)),
-            transforms.RandomHorizontalFlip(),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-    )
-    eval_tfms = transforms.Compose(
-        [
-            transforms.Resize(int(image_size * 1.15)),
-            transforms.CenterCrop(image_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-    )
+    raw_tfms = transforms.PILToTensor()
 
-    train_ds = datasets.ImageFolder(data_dir / "train", transform=train_tfms)
-    val_ds = datasets.ImageFolder(data_dir / "val", transform=eval_tfms)
-    test_ds = datasets.ImageFolder(data_dir / "test", transform=eval_tfms)
+    train_ds = datasets.ImageFolder(data_dir / "train", transform=raw_tfms)
+    val_ds = datasets.ImageFolder(data_dir / "val", transform=raw_tfms)
+    test_ds = datasets.ImageFolder(data_dir / "test", transform=raw_tfms)
 
     train_dl = DataLoader(
         train_ds,
@@ -124,6 +113,7 @@ def _build_dataloaders(
         shuffle=True,
         num_workers=workers,
         pin_memory=True,
+        collate_fn=_collate_raw_images,
     )
     val_dl = DataLoader(
         val_ds,
@@ -131,6 +121,7 @@ def _build_dataloaders(
         shuffle=False,
         num_workers=workers,
         pin_memory=True,
+        collate_fn=_collate_raw_images,
     )
     test_dl = DataLoader(
         test_ds,
@@ -138,8 +129,88 @@ def _build_dataloaders(
         shuffle=False,
         num_workers=workers,
         pin_memory=True,
+        collate_fn=_collate_raw_images,
     )
     return train_dl, val_dl, test_dl, train_ds.classes
+
+
+def _collate_raw_images(
+    batch: list[tuple[torch.Tensor, int]],
+) -> tuple[list[torch.Tensor], torch.Tensor]:
+    images, labels = zip(*batch)
+    return list(images), torch.tensor(labels, dtype=torch.long)
+
+
+def _resize_tensor(image: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
+    return F.interpolate(
+        image.unsqueeze(0),
+        size=size,
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(0)
+
+
+def _center_crop_tensor(image: torch.Tensor, crop_size: int) -> torch.Tensor:
+    _, height, width = image.shape
+    top = max((height - crop_size) // 2, 0)
+    left = max((width - crop_size) // 2, 0)
+    return image[:, top : top + crop_size, left : left + crop_size]
+
+
+def _resize_shorter_edge(image: torch.Tensor, size: int) -> torch.Tensor:
+    _, height, width = image.shape
+    if height < width:
+        new_height = size
+        new_width = int(width * size / height)
+    else:
+        new_width = size
+        new_height = int(height * size / width)
+    return _resize_tensor(image, (new_height, new_width))
+
+
+def _apply_gpu_color_jitter(image: torch.Tensor) -> torch.Tensor:
+    adjustments = [
+        lambda x: TF.adjust_brightness(x, random.uniform(0.8, 1.2)),
+        lambda x: TF.adjust_contrast(x, random.uniform(0.8, 1.2)),
+        lambda x: TF.adjust_saturation(x, random.uniform(0.8, 1.2)),
+        lambda x: TF.adjust_hue(x, random.uniform(-0.05, 0.05)),
+    ]
+    random.shuffle(adjustments)
+    for adjustment in adjustments:
+        image = adjustment(image)
+    return image
+
+
+def _prepare_images_on_device(
+    images: list[torch.Tensor],
+    device: torch.device,
+    image_size: int,
+    training: bool,
+) -> torch.Tensor:
+    processed: list[torch.Tensor] = []
+    for image in images:
+        image = image.to(device=device, non_blocking=True, dtype=torch.float32).div_(255.0)
+        if training:
+            i, j, h, w = transforms.RandomResizedCrop.get_params(
+                image,
+                scale=(0.75, 1.0),
+                ratio=(3.0 / 4.0, 4.0 / 3.0),
+            )
+            image = image[:, i : i + h, j : j + w]
+            image = _resize_tensor(image, (image_size, image_size))
+            if random.random() < 0.5:
+                image = torch.flip(image, dims=[2])
+            image = _apply_gpu_color_jitter(image)
+        else:
+            image = _resize_shorter_edge(image, int(image_size * 1.15))
+            image = _center_crop_tensor(image, image_size)
+
+        processed.append(image)
+
+    batch = torch.stack(processed)
+    mean = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=device).view(1, 3, 1, 1)
+    return batch.sub_(mean).div_(std)
 
 
 def _accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
@@ -153,12 +224,18 @@ def _eval_epoch(
     dataloader: DataLoader,
     device: torch.device,
     criterion: nn.Module,
+    image_size: int,
 ) -> Tuple[float, float]:
     model.eval()
     losses = []
     accs = []
     for images, labels in dataloader:
-        images = images.to(device, non_blocking=True)
+        images = _prepare_images_on_device(
+            images,
+            device=device,
+            image_size=image_size,
+            training=False,
+        )
         labels = labels.to(device, non_blocking=True)
         logits = model(images)
         loss = criterion(logits, labels)
@@ -217,7 +294,12 @@ def run_training(
         batch_accs = []
 
         for images, labels in train_dl:
-            images = images.to(device, non_blocking=True)
+            images = _prepare_images_on_device(
+                images,
+                device=device,
+                image_size=image_size,
+                training=True,
+            )
             labels = labels.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
@@ -233,7 +315,7 @@ def run_training(
 
         train_loss = float(np.mean(batch_losses))
         train_acc = float(np.mean(batch_accs))
-        val_loss, val_acc = _eval_epoch(model, val_dl, device, criterion)
+        val_loss, val_acc = _eval_epoch(model, val_dl, device, criterion, image_size)
 
         print(
             f"Epoch {epoch:02d}/{epochs} "
@@ -254,7 +336,7 @@ def run_training(
 
     checkpoint = torch.load(best_ckpt, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
-    test_loss, test_acc = _eval_epoch(model, test_dl, device, criterion)
+    test_loss, test_acc = _eval_epoch(model, test_dl, device, criterion, image_size)
     print(f"Final test | loss={test_loss:.4f} acc={test_acc:.4f}")
 
     metrics: Dict[str, object] = {
@@ -301,21 +383,14 @@ def run_evaluation(
     classes = checkpoint["classes"]
     image_size = int(checkpoint["image_size"])
 
-    eval_tfms = transforms.Compose(
-        [
-            transforms.Resize(int(image_size * 1.15)),
-            transforms.CenterCrop(image_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-    )
-    test_ds = datasets.ImageFolder(test_path, transform=eval_tfms)
+    test_ds = datasets.ImageFolder(test_path, transform=transforms.PILToTensor())
     test_dl = DataLoader(
         test_ds,
         batch_size=batch_size,
         shuffle=False,
         num_workers=workers,
         pin_memory=True,
+        collate_fn=_collate_raw_images,
     )
 
     if test_ds.classes != classes:
@@ -338,7 +413,12 @@ def run_evaluation(
     all_targets: List[int] = []
     with torch.no_grad():
         for images, labels in test_dl:
-            images = images.to(device, non_blocking=True)
+            images = _prepare_images_on_device(
+                images,
+                device=device,
+                image_size=image_size,
+                training=False,
+            )
             labels = labels.to(device, non_blocking=True)
             logits = model(images)
             loss = criterion(logits, labels)
