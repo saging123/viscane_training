@@ -171,6 +171,24 @@ Example response:
     "maturity_status": "mature"
   },
   "top_k": [
+
+  ## Download a Google Drive dataset folder
+
+  If your dataset is shared from Google Drive as a folder, use the root script:
+
+  ```bash
+  python gdrive_downloader.py \
+    <DRIVE_FOLDER_ID_OR_URL> \
+    --output-dir /content/data/raw
+  ```
+
+  The script uses `gdown` to download a folder into the local dataset directory.
+  Install dependencies first:
+
+  ```bash
+  pip install -r requirements.txt
+  ```
+
     {
       "class_index": 0,
       "confidence": 0.94,
