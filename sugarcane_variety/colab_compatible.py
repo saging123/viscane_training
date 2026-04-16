@@ -34,6 +34,7 @@ def preprocess_for_colab(
     resize: int | None = 256,
     label_mode: str = "variety",
     preprocess_device: str = "auto",
+    preprocess_workers: int = 1,
 ) -> PreprocessSummary:
     """Run preprocessing with Colab-friendly defaults."""
     return run_preprocess(
@@ -45,6 +46,7 @@ def preprocess_for_colab(
         image_size=resize,
         label_mode=label_mode,  # "variety" or "variety_maturity"
         preprocess_device=preprocess_device,  # "auto", "cuda", or "cpu"
+        preprocess_workers=preprocess_workers,
     )
 
 
@@ -129,6 +131,7 @@ def run_all_for_colab(
     seed: int = 42,
     label_mode: str = "variety",
     preprocess_device: str = "auto",
+    preprocess_workers: int = 1,
 ) -> tuple[PreprocessSummary, TrainSummary]:
     """
     End-to-end preprocessing + training wrapper for Colab notebooks.
@@ -142,6 +145,7 @@ def run_all_for_colab(
         resize=resize,
         label_mode=label_mode,
         preprocess_device=preprocess_device,
+        preprocess_workers=preprocess_workers,
     )
 
     train_summary = train_for_colab(

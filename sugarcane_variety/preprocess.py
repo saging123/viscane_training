@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 import hashlib
 import random
 import shutil
@@ -174,6 +175,78 @@ def _save_processed_image(
         img.save(dst.with_suffix(".jpg"), format="JPEG", quality=95)
 
 
+def _verify_image(path: Path) -> bool:
+    try:
+        with Image.open(path) as img:
+            img.verify()
+        return True
+    except (UnidentifiedImageError, OSError):
+        return False
+
+
+def _verify_image_worker(path: str) -> tuple[str, bool]:
+    return path, _verify_image(Path(path))
+
+
+def _filter_valid_paths(
+    paths: List[Path],
+    workers: int,
+) -> tuple[List[Path], int]:
+    if workers <= 1:
+        valid_paths: List[Path] = []
+        skipped_corrupt = 0
+        for path in paths:
+            if _verify_image(path):
+                valid_paths.append(path)
+            else:
+                skipped_corrupt += 1
+        return valid_paths, skipped_corrupt
+
+    valid_paths = []
+    skipped_corrupt = 0
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        for path, is_valid in executor.map(_verify_image_worker, [str(p) for p in paths]):
+            if is_valid:
+                valid_paths.append(Path(path))
+            else:
+                skipped_corrupt += 1
+    return valid_paths, skipped_corrupt
+
+
+def _save_processed_image_worker(
+    task: tuple[str, str, int | None, str],
+) -> None:
+    src, dst, image_size, device_type = task
+    _save_processed_image(
+        Path(src),
+        Path(dst),
+        image_size=image_size,
+        device=torch.device(device_type),
+    )
+
+
+def _save_processed_images(
+    tasks: List[tuple[Path, Path]],
+    image_size: int | None,
+    device: torch.device,
+    workers: int,
+) -> None:
+    if not tasks:
+        return
+
+    if workers <= 1 or device.type == "cuda":
+        for src, dst in tasks:
+            _save_processed_image(src, dst, image_size=image_size, device=device)
+        return
+
+    worker_tasks = [
+        (str(src), str(dst), image_size, device.type)
+        for src, dst in tasks
+    ]
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        list(executor.map(_save_processed_image_worker, worker_tasks))
+
+
 def _unique_dst_path(dst_dir: Path, src: Path, force_jpg: bool) -> Path:
     digest = hashlib.sha1(str(src).encode("utf-8")).hexdigest()[:10]
     suffix = ".jpg" if force_jpg else src.suffix.lower()
@@ -190,6 +263,7 @@ def run_preprocess(
     image_size: int | None = None,
     label_mode: Literal["variety", "variety_maturity"] = "variety",
     preprocess_device: PreprocessDevice = "auto",
+    preprocess_workers: int = 1,
 ) -> PreprocessSummary:
     raw_path = Path(raw_dir).expanduser().resolve()
     out_path = Path(output_dir).expanduser().resolve()
@@ -198,6 +272,8 @@ def run_preprocess(
         raise FileNotFoundError(f"Raw dataset path does not exist: {raw_path}")
     if val_ratio < 0 or test_ratio < 0 or (val_ratio + test_ratio) >= 1:
         raise ValueError("Use ratios where val_ratio >= 0, test_ratio >= 0, and sum < 1.")
+    if preprocess_workers < 1:
+        raise ValueError("preprocess_workers must be at least 1.")
 
     class_to_images = _collect_images_by_mode(raw_path, label_mode=label_mode)
     device = _resolve_preprocess_device(preprocess_device)
@@ -212,30 +288,29 @@ def run_preprocess(
     split_totals = {"train": 0, "val": 0, "test": 0}
 
     for class_name, paths in class_to_images.items():
-        valid_paths: List[Path] = []
-        for path in paths:
-            try:
-                with Image.open(path) as img:
-                    img.verify()
-                valid_paths.append(path)
-            except (UnidentifiedImageError, OSError):
-                skipped_corrupt += 1
+        valid_paths, class_skipped = _filter_valid_paths(
+            paths,
+            workers=preprocess_workers,
+        )
+        skipped_corrupt += class_skipped
 
         rng.shuffle(valid_paths)
         class_counts[class_name] = len(valid_paths)
         splits = _split_class_items(valid_paths, val_ratio=val_ratio, test_ratio=test_ratio)
 
+        save_tasks: List[tuple[Path, Path]] = []
         for split_name, split_paths in splits.items():
             dst_dir = out_path / split_name / class_name
             for src in split_paths:
                 dst = _unique_dst_path(dst_dir, src, force_jpg=image_size is not None)
-                _save_processed_image(
-                    src,
-                    dst,
-                    image_size=image_size,
-                    device=device,
-                )
+                save_tasks.append((src, dst))
                 split_totals[split_name] += 1
+        _save_processed_images(
+            save_tasks,
+            image_size=image_size,
+            device=device,
+            workers=preprocess_workers,
+        )
 
     return PreprocessSummary(
         classes=sorted(class_to_images.keys()),
@@ -253,6 +328,7 @@ def run_preprocess_flat(
     image_size: int | None = None,
     label_mode: Literal["variety", "variety_maturity"] = "variety",
     preprocess_device: PreprocessDevice = "auto",
+    preprocess_workers: int = 1,
 ) -> FlatPreprocessSummary:
     """
     Validate and preprocess dataset while preserving folder-per-class structure:
@@ -263,6 +339,8 @@ def run_preprocess_flat(
 
     if not raw_path.exists():
         raise FileNotFoundError(f"Raw dataset path does not exist: {raw_path}")
+    if preprocess_workers < 1:
+        raise ValueError("preprocess_workers must be at least 1.")
 
     if label_mode == "variety":
         class_to_images = _collect_images(raw_path)
@@ -286,20 +364,24 @@ def run_preprocess_flat(
             dst_dir = out_path / variety_name / maturity_name
         else:
             dst_dir = out_path / class_name
-        valid_count = 0
-        for src in paths:
-            try:
-                with Image.open(src) as img:
-                    img.verify()
-            except (UnidentifiedImageError, OSError):
-                skipped_corrupt += 1
-                continue
+        valid_paths, class_skipped = _filter_valid_paths(
+            paths,
+            workers=preprocess_workers,
+        )
+        skipped_corrupt += class_skipped
 
+        save_tasks: List[tuple[Path, Path]] = []
+        for src in valid_paths:
             dst = _unique_dst_path(dst_dir, src, force_jpg=image_size is not None)
-            _save_processed_image(src, dst, image_size=image_size, device=device)
-            valid_count += 1
             total_count += 1
-        class_counts[class_name] = valid_count
+            save_tasks.append((src, dst))
+        _save_processed_images(
+            save_tasks,
+            image_size=image_size,
+            device=device,
+            workers=preprocess_workers,
+        )
+        class_counts[class_name] = len(valid_paths)
 
     return FlatPreprocessSummary(
         classes=sorted(class_to_images.keys()),

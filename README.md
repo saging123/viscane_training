@@ -41,12 +41,14 @@ python main.py preprocess \
   --label-mode variety_maturity \
   --resize 256 \
   --preprocess-device auto \
+  --preprocess-workers 4 \
   --seed 42
 ```
 
 `--preprocess-device auto` uses CUDA for resize preprocessing when a GPU is available.
 Use `--preprocess-device cuda` to require GPU, or `--preprocess-device cpu` to force CPU.
-Image validation, file copying, and JPEG writing still use CPU/disk because those steps are I/O-bound.
+Use `--preprocess-device cpu --preprocess-workers 4` or higher to crop/resize images
+with multiple CPU worker processes.
 
 ### Preprocess to folder-per-variety output (no split)
 
@@ -62,7 +64,8 @@ python main.py preprocess-flat \
   --processed-dir processed \
   --label-mode variety_maturity \
   --resize 256 \
-  --preprocess-device auto
+  --preprocess-device auto \
+  --preprocess-workers 4
 ```
 
 ### Train only (after preprocess)
@@ -105,6 +108,7 @@ python main.py all \
   --label-mode variety_maturity \
   --resize 256 \
   --preprocess-device auto \
+  --preprocess-workers 4 \
   --epochs 25 \
   --batch-size 32 \
   --lr 0.001 \

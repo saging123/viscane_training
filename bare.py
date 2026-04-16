@@ -10,6 +10,8 @@ if __name__ == "__main__":
         batch_size=32,
         image_size=224,
         workers=8,
+        preprocess_device="cpu",
+        preprocess_workers=8,
     )
 
     eval_result = test_for_colab(
