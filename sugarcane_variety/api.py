@@ -52,11 +52,11 @@ class TrainingRequest(BaseModel):
     lr: float = Field(default=1e-3, gt=0.0)
     weight_decay: float = Field(default=1e-4, ge=0.0)
     image_size: int = Field(default=224, ge=1)
-    workers: int = Field(default=2, ge=0)
+    workers: int = Field(default=8, ge=0)
     seed: int = 42
     label_mode: str = "variety_maturity"
     preprocess_device: str = "auto"
-    preprocess_workers: int = Field(default=1, ge=1)
+    preprocess_workers: int = Field(default=8, ge=1)
     perform_preprocess: bool = True
 
 
