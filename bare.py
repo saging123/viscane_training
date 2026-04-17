@@ -17,7 +17,7 @@ if __name__ == "__main__":
         label_mode="variety_maturity",
         preprocess_device="cpu",
         preprocess_workers=8,
-        perform_preprocess=False,
+        perform_preprocess=True,
     )
 
     eval_result = test_for_colab(

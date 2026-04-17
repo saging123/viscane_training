@@ -170,6 +170,31 @@ Useful endpoints:
 - `GET /health`: check whether the model loaded.
 - `GET /classes`: list class labels.
 - `POST /predict`: upload one image and get the predicted sugarcane class.
+- `POST /training/start`: start preprocessing/training in the background.
+- `GET /training/status`: check the current training job status.
+- `GET /artifacts/download`: download `.pt` and `.json` artifact files as a ZIP.
+
+Start training through the API:
+
+```bash
+curl -X POST "http://localhost:8000/training/start" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "raw_dir": "content/data/raw",
+    "prepared_dir": "content/data/prepared",
+    "output_dir": "content/data/sugarcane_artifacts",
+    "label_mode": "variety_maturity",
+    "epochs": 25,
+    "batch_size": 32,
+    "perform_preprocess": true
+  }'
+```
+
+Check training status:
+
+```bash
+curl "http://localhost:8000/training/status"
+```
 
 Example prediction request:
 
