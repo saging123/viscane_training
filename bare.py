@@ -1,4 +1,8 @@
-from sugarcane_variety.colab_compatible import run_all_for_colab, test_for_colab
+from sugarcane_variety.colab_compatible import (
+    print_eval_summary,
+    run_all_for_colab,
+    test_for_colab,
+)
 
 
 if __name__ == "__main__":
@@ -10,6 +14,7 @@ if __name__ == "__main__":
         batch_size=32,
         image_size=224,
         workers=8,
+        label_mode="variety_maturity",
         preprocess_device="cpu",
         preprocess_workers=8,
         perform_preprocess=False,
@@ -24,4 +29,4 @@ if __name__ == "__main__":
 
     print(prep)
     print(train)
-    print(eval_result)
+    print_eval_summary(eval_result)

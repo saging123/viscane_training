@@ -1,0 +1,1 @@
+gcloud storage cp --recursive gs://viscane/DATASETSFINAL/ ~/viscane_training/content/data/raw
