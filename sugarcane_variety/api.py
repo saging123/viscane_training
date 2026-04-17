@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+from PIL import Image, ImageDraw, UnidentifiedImageError
 from torch import nn
 from torchvision import models, transforms
 
@@ -99,60 +99,30 @@ def _maturity_reason(probabilities: torch.Tensor) -> dict[str, Any]:
     }
 
 
-def _wrap_text(text: str, max_chars: int) -> list[str]:
-    words = text.split()
-    lines: list[str] = []
-    current = ""
-    for word in words:
-        candidate = f"{current} {word}".strip()
-        if len(candidate) <= max_chars:
-            current = candidate
-        else:
-            if current:
-                lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines
-
-
 def _draw_prediction_overlay(
     image: Image.Image,
-    prediction: dict[str, Any],
     maturity_reason: dict[str, Any],
 ) -> Image.Image:
     annotated = image.copy()
     draw = ImageDraw.Draw(annotated, "RGBA")
-    font = ImageFont.load_default()
 
-    maturity_lines = [
-        f"class: {prediction['class_name']}",
-        f"variety: {prediction['variety']}",
-        f"maturity: {maturity_reason['maturity_status']}",
-        f"class_confidence: {prediction['confidence']:.4f}",
-        f"maturity_probability: {maturity_reason['maturity_probability']:.4f}",
-        f"next_best_maturity_probability: {maturity_reason['next_best_probability']:.4f}",
-        f"maturity_margin: {maturity_reason['margin']:.4f}",
-    ]
-    maturity_lines.extend(_wrap_text(str(maturity_reason["reason"]), max_chars=58))
+    crop_scale = image_size / int(image_size * 1.15)
+    crop_size = min(annotated.width, annotated.height) * crop_scale
+    left = (annotated.width - crop_size) / 2
+    top = (annotated.height - crop_size) / 2
+    right = left + crop_size
+    bottom = top + crop_size
 
-    line_height = 15
-    padding = 10
-    box_width = min(max(440, annotated.width - 24), annotated.width)
-    box_height = padding * 2 + line_height * len(maturity_lines)
-    left = 0 if annotated.width < box_width + 24 else 12
-    top = 0 if annotated.height < box_height + 24 else 12
-    right = min(left + box_width, annotated.width)
-    bottom = min(top + box_height, annotated.height)
+    maturity_status = str(maturity_reason["maturity_status"]).lower()
+    if maturity_status == "mature":
+        color = (31, 180, 90, 255)
+    elif maturity_status in {"not_mature", "not mature", "immature"}:
+        color = (220, 55, 55, 255)
+    else:
+        color = (255, 210, 65, 255)
 
-    draw.rectangle((left, top, right, bottom), fill=(0, 0, 0, 185))
-    draw.rectangle((left, top, right, bottom), outline=(255, 255, 255, 220), width=2)
-
-    text_x = left + padding
-    text_y = top + padding
-    for line in maturity_lines:
-        draw.text((text_x, text_y), line, fill=(255, 255, 255, 255), font=font)
-        text_y += line_height
+    line_width = max(3, min(12, min(annotated.width, annotated.height) // 80))
+    draw.rectangle((left, top, right, bottom), outline=color, width=line_width)
 
     return annotated
 
@@ -237,7 +207,6 @@ async def predict_annotated(file: UploadFile = File(...), top_k: int = 3) -> Str
 
     annotated = _draw_prediction_overlay(
         image=pil_image,
-        prediction=predictions[0],
         maturity_reason=reason,
     )
     output = io.BytesIO()
@@ -249,6 +218,8 @@ async def predict_annotated(file: UploadFile = File(...), top_k: int = 3) -> Str
         "X-Predicted-Variety": str(predictions[0]["variety"]),
         "X-Predicted-Maturity": str(reason["maturity_status"]),
         "X-Maturity-Probability": f"{reason['maturity_probability']:.6f}",
+        "X-Next-Best-Maturity-Probability": f"{reason['next_best_probability']:.6f}",
         "X-Maturity-Margin": f"{reason['margin']:.6f}",
+        "X-Maturity-Reason": str(reason["reason"]),
     }
     return StreamingResponse(output, media_type="image/png", headers=headers)
