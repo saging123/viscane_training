@@ -132,21 +132,24 @@ def run_all_for_colab(
     label_mode: str = "variety",
     preprocess_device: str = "auto",
     preprocess_workers: int = 1,
-) -> tuple[PreprocessSummary, TrainSummary]:
+    perform_preprocess: bool = True,
+) -> tuple[PreprocessSummary | None, TrainSummary]:
     """
     End-to-end preprocessing + training wrapper for Colab notebooks.
     """
-    prep_summary = preprocess_for_colab(
-        raw_dir=raw_dir,
-        prepared_dir=prepared_dir,
-        val_ratio=val_ratio,
-        test_ratio=test_ratio,
-        seed=seed,
-        resize=resize,
-        label_mode=label_mode,
-        preprocess_device=preprocess_device,
-        preprocess_workers=preprocess_workers,
-    )
+    prep_summary = None
+    if perform_preprocess:
+        prep_summary = preprocess_for_colab(
+            raw_dir=raw_dir,
+            prepared_dir=prepared_dir,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+            resize=resize,
+            label_mode=label_mode,
+            preprocess_device=preprocess_device,
+            preprocess_workers=preprocess_workers,
+        )
 
     train_summary = train_for_colab(
         prepared_dir=prepared_dir,

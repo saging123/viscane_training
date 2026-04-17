@@ -117,6 +117,22 @@ python main.py all \
   --seed 42
 ```
 
+If `data/prepared` is already built and you only want to adjust training settings,
+skip preprocessing:
+
+```bash
+python main.py all \
+  --skip-preprocess \
+  --prepared-dir data/prepared \
+  --output-dir artifacts \
+  --epochs 25 \
+  --batch-size 32 \
+  --lr 0.001 \
+  --image-size 224 \
+  --workers 4 \
+  --seed 42
+```
+
 ## Output artifacts
 
 - `artifacts/best_model.pt`: best checkpoint (by validation accuracy)

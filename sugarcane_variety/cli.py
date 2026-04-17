@@ -110,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
 
     all_cmd = subparsers.add_parser("all", help="Run preprocess then train.")
-    all_cmd.add_argument("--raw-dir", required=True, help="Path to raw dataset root.")
+    all_cmd.add_argument("--raw-dir", help="Path to raw dataset root.")
     all_cmd.add_argument(
         "--prepared-dir",
         default="data/prepared",
@@ -155,6 +155,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="CPU workers for image validation and preprocessing.",
+    )
+    all_cmd.add_argument(
+        "--skip-preprocess",
+        action="store_true",
+        help="Assume prepared-dir already exists and run training only.",
     )
 
     return parser
@@ -248,21 +253,26 @@ def main() -> None:
         return
 
     if args.command == "all":
-        prep_summary = run_preprocess(
-            raw_dir=args.raw_dir,
-            output_dir=args.prepared_dir,
-            val_ratio=args.val_ratio,
-            test_ratio=args.test_ratio,
-            seed=args.seed,
-            image_size=args.resize,
-            label_mode=args.label_mode,
-            preprocess_device=args.preprocess_device,
-            preprocess_workers=args.preprocess_workers,
-        )
-        print(
-            f"Preprocess complete | train={prep_summary.train_count} "
-            f"val={prep_summary.val_count} test={prep_summary.test_count}"
-        )
+        if args.skip_preprocess:
+            print(f"Skipping preprocess; using prepared dataset at {args.prepared_dir}")
+        else:
+            if not args.raw_dir:
+                raise ValueError("--raw-dir is required unless --skip-preprocess is set.")
+            prep_summary = run_preprocess(
+                raw_dir=args.raw_dir,
+                output_dir=args.prepared_dir,
+                val_ratio=args.val_ratio,
+                test_ratio=args.test_ratio,
+                seed=args.seed,
+                image_size=args.resize,
+                label_mode=args.label_mode,
+                preprocess_device=args.preprocess_device,
+                preprocess_workers=args.preprocess_workers,
+            )
+            print(
+                f"Preprocess complete | train={prep_summary.train_count} "
+                f"val={prep_summary.val_count} test={prep_summary.test_count}"
+            )
         train_summary = run_training(
             prepared_dir=args.prepared_dir,
             output_dir=args.output_dir,

@@ -12,11 +12,12 @@ if __name__ == "__main__":
         workers=8,
         preprocess_device="cpu",
         preprocess_workers=8,
+        perform_preprocess=False,
     )
 
     eval_result = test_for_colab(
         prepared_dir="content/data/prepared",
-        checkpoint_path="content/drive/MyDrive/sugarcane_artifacts/best_model.pt",
+        checkpoint_path="content/data/sugarcane_artifacts/best_model.pt",
         batch_size=32,
         workers=8,
     )
