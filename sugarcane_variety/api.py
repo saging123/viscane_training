@@ -2,21 +2,27 @@ from __future__ import annotations
 
 import io
 import os
+import threading
+import zipfile
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn.functional as F
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from PIL import Image, ImageDraw, UnidentifiedImageError
+from pydantic import BaseModel, Field
 from torch import nn
 from torchvision import models, transforms
 
 from sugarcane_variety.train import _decode_class_name, _prepare_images_on_device
+from sugarcane_variety.colab_compatible import run_all_for_colab, test_for_colab
 
 
 DEFAULT_CHECKPOINT_PATH = "artifacts/best_model.pt"
+ARTIFACT_EXTENSIONS = {".pt", ".json"}
 
 
 app = FastAPI(title="Sugarcane Variety Classifier API")
@@ -26,6 +32,32 @@ classes: list[str] = []
 image_size = 224
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 to_tensor = transforms.PILToTensor()
+model_load_error: str | None = None
+training_lock = threading.Lock()
+training_status: dict[str, Any] = {
+    "state": "idle",
+    "message": "No training job has been started.",
+}
+
+
+class TrainingRequest(BaseModel):
+    raw_dir: str = "content/data/raw"
+    prepared_dir: str = "content/data/prepared"
+    output_dir: str = "content/data/sugarcane_artifacts"
+    val_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
+    test_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
+    resize: int | None = 256
+    epochs: int = Field(default=25, ge=1)
+    batch_size: int = Field(default=32, ge=1)
+    lr: float = Field(default=1e-3, gt=0.0)
+    weight_decay: float = Field(default=1e-4, ge=0.0)
+    image_size: int = Field(default=224, ge=1)
+    workers: int = Field(default=2, ge=0)
+    seed: int = 42
+    label_mode: str = "variety_maturity"
+    preprocess_device: str = "auto"
+    preprocess_workers: int = Field(default=1, ge=1)
+    perform_preprocess: bool = True
 
 
 def _open_uploaded_image(contents: bytes) -> tuple[Image.Image, torch.Tensor]:
@@ -131,8 +163,108 @@ def _checkpoint_path() -> Path:
     return Path(os.getenv("MODEL_CHECKPOINT", DEFAULT_CHECKPOINT_PATH)).expanduser().resolve()
 
 
+def _artifacts_dir() -> Path:
+    return Path(os.getenv("ARTIFACTS_DIR", _checkpoint_path().parent)).expanduser().resolve()
+
+
+def _build_artifacts_zip(artifacts_dir: Path) -> io.BytesIO:
+    if not artifacts_dir.exists() or not artifacts_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Artifacts folder not found: {artifacts_dir}",
+        )
+
+    artifact_files = sorted(
+        path
+        for path in artifacts_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in ARTIFACT_EXTENSIONS
+    )
+    if not artifact_files:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No .pt or .json artifact files found in: {artifacts_dir}",
+        )
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in artifact_files:
+            archive.write(path, arcname=path.relative_to(artifacts_dir))
+    output.seek(0)
+    return output
+
+
+def _summary_to_dict(summary: Any) -> dict[str, Any] | None:
+    if summary is None:
+        return None
+    if is_dataclass(summary):
+        return asdict(summary)
+    if isinstance(summary, dict):
+        return summary
+    return {"value": str(summary)}
+
+
+def _set_training_status(**updates: Any) -> None:
+    training_status.update(updates)
+
+
+def _run_training_job(request: TrainingRequest) -> None:
+    try:
+        _set_training_status(
+            state="running",
+            message="Training is running.",
+            request=request.dict(),
+        )
+
+        prep_summary, train_summary = run_all_for_colab(
+            raw_dir=request.raw_dir,
+            prepared_dir=request.prepared_dir,
+            output_dir=request.output_dir,
+            val_ratio=request.val_ratio,
+            test_ratio=request.test_ratio,
+            resize=request.resize,
+            epochs=request.epochs,
+            batch_size=request.batch_size,
+            lr=request.lr,
+            weight_decay=request.weight_decay,
+            image_size=request.image_size,
+            workers=request.workers,
+            seed=request.seed,
+            label_mode=request.label_mode,
+            preprocess_device=request.preprocess_device,
+            preprocess_workers=request.preprocess_workers,
+            perform_preprocess=request.perform_preprocess,
+        )
+
+        eval_summary = test_for_colab(
+            prepared_dir=request.prepared_dir,
+            checkpoint_path=train_summary.checkpoint_path,
+            batch_size=request.batch_size,
+            workers=request.workers,
+        )
+
+        os.environ["MODEL_CHECKPOINT"] = train_summary.checkpoint_path
+        _load_model()
+
+        _set_training_status(
+            state="completed",
+            message="Training completed. The API model was reloaded from the new checkpoint.",
+            preprocess_summary=_summary_to_dict(prep_summary),
+            train_summary=_summary_to_dict(train_summary),
+            eval_summary=_summary_to_dict(eval_summary),
+            checkpoint_path=train_summary.checkpoint_path,
+        )
+    except Exception as exc:
+        _set_training_status(
+            state="failed",
+            message="Training failed.",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    finally:
+        training_lock.release()
+
+
 def _load_model() -> None:
-    global model, classes, image_size
+    global model, classes, image_size, model_load_error
 
     checkpoint_path = _checkpoint_path()
     if not checkpoint_path.exists():
@@ -152,17 +284,25 @@ def _load_model() -> None:
     loaded_model.eval()
 
     model = loaded_model
+    model_load_error = None
 
 
 @app.on_event("startup")
 def startup() -> None:
-    _load_model()
+    global model_load_error
+
+    try:
+        _load_model()
+    except Exception as exc:
+        model_load_error = f"{type(exc).__name__}: {exc}"
 
 
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {
         "status": "ok",
+        "model_loaded": model is not None,
+        "model_load_error": model_load_error,
         "device": str(device),
         "checkpoint": str(_checkpoint_path()),
         "classes": len(classes),
@@ -181,6 +321,61 @@ def list_classes() -> dict[str, Any]:
             for index, class_name in enumerate(classes)
         ]
     }
+
+
+@app.get("/artifacts/download")
+def download_artifacts() -> StreamingResponse:
+    artifacts_dir = _artifacts_dir()
+    output = _build_artifacts_zip(artifacts_dir)
+    headers = {
+        "Content-Disposition": 'attachment; filename="sugarcane_artifacts.zip"',
+        "X-Artifacts-Dir": str(artifacts_dir),
+    }
+    return StreamingResponse(output, media_type="application/zip", headers=headers)
+
+
+@app.post("/training/start", status_code=202)
+def start_training(
+    request: TrainingRequest,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    if request.val_ratio + request.test_ratio >= 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Use ratios where val_ratio + test_ratio is less than 1.",
+        )
+    if request.label_mode not in {"variety", "variety_maturity"}:
+        raise HTTPException(
+            status_code=400,
+            detail="label_mode must be 'variety' or 'variety_maturity'.",
+        )
+    if request.preprocess_device not in {"auto", "cuda", "cpu"}:
+        raise HTTPException(
+            status_code=400,
+            detail="preprocess_device must be 'auto', 'cuda', or 'cpu'.",
+        )
+
+    if not training_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="A training job is already running.",
+        )
+
+    _set_training_status(
+        state="queued",
+        message="Training job was accepted and will start in the background.",
+        request=request.dict(),
+    )
+    background_tasks.add_task(_run_training_job, request)
+    return {
+        "state": "queued",
+        "message": "Training job accepted. Poll /training/status for progress.",
+    }
+
+
+@app.get("/training/status")
+def get_training_status() -> dict[str, Any]:
+    return training_status
 
 
 @app.post("/predict")
