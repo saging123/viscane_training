@@ -98,6 +98,17 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--image-size", type=int, default=224, help="Input size.")
     train.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
     train.add_argument("--seed", type=int, default=42, help="Random seed.")
+    train.add_argument(
+        "--model-type",
+        choices=["resnet18", "yolov8"],
+        default="resnet18",
+        help="Model pipeline to train.",
+    )
+    train.add_argument(
+        "--yolo-weights",
+        default="yolov8n-cls.pt",
+        help="YOLOv8 classification weights to fine-tune.",
+    )
 
     test = subparsers.add_parser("test", help="Evaluate checkpoint on test split.")
     test.add_argument("--prepared-dir", required=True, help="Prepared dataset root.")
@@ -108,6 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     test.add_argument("--batch-size", type=int, default=32, help="Batch size.")
     test.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
+    test.add_argument(
+        "--model-type",
+        choices=["resnet18", "yolov8"],
+        default=None,
+        help="Checkpoint model type. Auto-detected for ResNet18 checkpoints.",
+    )
 
     all_cmd = subparsers.add_parser("all", help="Run preprocess then train.")
     all_cmd.add_argument("--raw-dir", help="Path to raw dataset root.")
@@ -138,6 +155,17 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument("--image-size", type=int, default=224, help="Input size.")
     all_cmd.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
     all_cmd.add_argument("--seed", type=int, default=42, help="Random seed.")
+    all_cmd.add_argument(
+        "--model-type",
+        choices=["resnet18", "yolov8"],
+        default="resnet18",
+        help="Model pipeline to train.",
+    )
+    all_cmd.add_argument(
+        "--yolo-weights",
+        default="yolov8n-cls.pt",
+        help="YOLOv8 classification weights to fine-tune.",
+    )
     all_cmd.add_argument(
         "--label-mode",
         choices=["variety", "variety_maturity"],
@@ -215,11 +243,20 @@ def main() -> None:
             image_size=args.image_size,
             workers=args.workers,
             seed=args.seed,
+            model_type=args.model_type,
+            yolo_weights=args.yolo_weights,
         )
         print("Training complete")
+        print(f"Model type: {summary.model_type}")
         print(f"Best val acc: {summary.best_val_acc:.4f}")
         print(f"Test acc: {summary.test_acc:.4f}")
         print(f"Checkpoint: {summary.checkpoint_path}")
+        if summary.android_artifact_path:
+            print(f"Android artifact: {summary.android_artifact_path}")
+        if summary.onnx_artifact_path:
+            print(f"ONNX artifact: {summary.onnx_artifact_path}")
+        if summary.android_metadata_path:
+            print(f"Android metadata: {summary.android_metadata_path}")
         return
 
     if args.command == "test":
@@ -228,8 +265,10 @@ def main() -> None:
             checkpoint_path=args.checkpoint_path,
             batch_size=args.batch_size,
             workers=args.workers,
+            model_type=args.model_type,
         )
         print("Evaluation complete")
+        print(f"Model type: {summary.model_type}")
         print(f"Samples: {summary.num_samples}")
         print(f"Test loss: {summary.test_loss:.4f}")
         print(f"Exact label acc: {summary.test_acc:.4f}")
@@ -283,11 +322,20 @@ def main() -> None:
             image_size=args.image_size,
             workers=args.workers,
             seed=args.seed,
+            model_type=args.model_type,
+            yolo_weights=args.yolo_weights,
         )
         print("End-to-end complete")
+        print(f"Model type: {train_summary.model_type}")
         print(f"Best val acc: {train_summary.best_val_acc:.4f}")
         print(f"Test acc: {train_summary.test_acc:.4f}")
         print(f"Checkpoint: {train_summary.checkpoint_path}")
+        if train_summary.android_artifact_path:
+            print(f"Android artifact: {train_summary.android_artifact_path}")
+        if train_summary.onnx_artifact_path:
+            print(f"ONNX artifact: {train_summary.onnx_artifact_path}")
+        if train_summary.android_metadata_path:
+            print(f"Android metadata: {train_summary.android_metadata_path}")
         return
 
     raise ValueError(f"Unknown command: {args.command}")

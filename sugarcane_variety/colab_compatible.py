@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 from sugarcane_variety.preprocess import PreprocessSummary, run_preprocess
 from sugarcane_variety.train import EvalSummary, TrainSummary, run_evaluation, run_training
@@ -60,6 +61,9 @@ def train_for_colab(
     image_size: int = 224,
     workers: int = 2,
     seed: int = 42,
+    model_type: str = "resnet18",
+    yolo_weights: str = "yolov8n-cls.pt",
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> TrainSummary:
     """Run training with Colab-friendly defaults."""
     return run_training(
@@ -72,6 +76,9 @@ def train_for_colab(
         image_size=image_size,
         workers=workers,
         seed=seed,
+        model_type=model_type,
+        yolo_weights=yolo_weights,
+        progress_callback=progress_callback,
     )
 
 
@@ -80,6 +87,7 @@ def test_for_colab(
     checkpoint_path: str = "/content/artifacts/best_model.pt",
     batch_size: int = 32,
     workers: int = 2,
+    model_type: str | None = None,
 ) -> EvalSummary:
     """Run test-only evaluation in Colab."""
     return run_evaluation(
@@ -87,12 +95,14 @@ def test_for_colab(
         checkpoint_path=checkpoint_path,
         batch_size=batch_size,
         workers=workers,
+        model_type=model_type,
     )
 
 
 def print_eval_summary(summary: EvalSummary) -> None:
     """Pretty-print evaluation summary in Colab output cells."""
     print("Evaluation complete")
+    print(f"Model type: {summary.model_type}")
     print(f"Samples: {summary.num_samples}")
     print(f"Test loss: {summary.test_loss:.4f}")
     print(f"Exact label acc: {summary.test_acc:.4f}")
@@ -133,6 +143,9 @@ def run_all_for_colab(
     preprocess_device: str = "auto",
     preprocess_workers: int = 1,
     perform_preprocess: bool = True,
+    model_type: str = "resnet18",
+    yolo_weights: str = "yolov8n-cls.pt",
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[PreprocessSummary | None, TrainSummary]:
     """
     End-to-end preprocessing + training wrapper for Colab notebooks.
@@ -161,5 +174,8 @@ def run_all_for_colab(
         image_size=image_size,
         workers=workers,
         seed=seed,
+        model_type=model_type,
+        yolo_weights=yolo_weights,
+        progress_callback=progress_callback,
     )
     return prep_summary, train_summary

@@ -6,3 +6,5 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 python-multipart>=0.0.9
 gdown>=4.7.1
+ultralytics>=8.2.0
+onnx>=1.16.0

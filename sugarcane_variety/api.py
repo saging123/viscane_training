@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import threading
+import time
 import zipfile
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -14,20 +16,25 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from PIL import Image, ImageDraw, UnidentifiedImageError
 from pydantic import BaseModel, Field
-from torch import nn
-from torchvision import models, transforms
+from torchvision import transforms
 
-from sugarcane_variety.train import _decode_class_name, _prepare_images_on_device
+from sugarcane_variety.train import (
+    _build_resnet18,
+    _decode_class_name,
+    _prepare_images_on_device,
+)
 from sugarcane_variety.colab_compatible import run_all_for_colab, test_for_colab
 
 
 DEFAULT_CHECKPOINT_PATH = "artifacts/best_model.pt"
-ARTIFACT_EXTENSIONS = {".pt", ".json"}
+ARTIFACT_EXTENSIONS = {".pt", ".ptl", ".onnx", ".json"}
+SUPPORTED_MODELS = {"resnet18", "yolov8"}
 
 
 app = FastAPI(title="Sugarcane Variety Classifier API")
 
-model: nn.Module | None = None
+model: Any | None = None
+loaded_model_type = "resnet18"
 classes: list[str] = []
 image_size = 224
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -38,9 +45,16 @@ training_status: dict[str, Any] = {
     "state": "idle",
     "message": "No training job has been started.",
 }
+report_lock = threading.Lock()
+current_training_report: dict[str, Any] = {
+    "state": "idle",
+    "events": [],
+    "epoch_history": [],
+}
 
 
 class TrainingRequest(BaseModel):
+    model_type: str = "resnet18"
     raw_dir: str = "content/data/raw"
     prepared_dir: str = "content/data/prepared"
     output_dir: str = "content/data/sugarcane_artifacts"
@@ -58,6 +72,12 @@ class TrainingRequest(BaseModel):
     preprocess_device: str = "auto"
     preprocess_workers: int = Field(default=8, ge=1)
     perform_preprocess: bool = True
+    yolo_weights: str = "yolov8n-cls.pt"
+
+
+class ModelLoadRequest(BaseModel):
+    checkpoint_path: str
+    model_type: str | None = None
 
 
 def _open_uploaded_image(contents: bytes) -> tuple[Image.Image, torch.Tensor]:
@@ -74,6 +94,17 @@ def _predict_probabilities(image: torch.Tensor) -> torch.Tensor:
     if model is None:
         raise HTTPException(status_code=503, detail="Model is not loaded yet.")
 
+    if loaded_model_type == "yolov8":
+        try:
+            result = model(_tensor_to_pil(image), verbose=False)[0]
+            probs = result.probs.data
+            return probs.detach().to(device="cpu")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"YOLOv8 prediction failed: {type(exc).__name__}: {exc}",
+            )
+
     with torch.no_grad():
         batch = _prepare_images_on_device(
             [image],
@@ -85,9 +116,16 @@ def _predict_probabilities(image: torch.Tensor) -> torch.Tensor:
         return F.softmax(logits, dim=1)[0]
 
 
+def _tensor_to_pil(image: torch.Tensor) -> Image.Image:
+    array = image.permute(1, 2, 0).detach().cpu().numpy()
+    return Image.fromarray(array)
+
+
 def _build_predictions(probabilities: torch.Tensor, top_k: int) -> list[dict[str, Any]]:
     if top_k < 1:
         raise HTTPException(status_code=400, detail="top_k must be at least 1.")
+    if not classes:
+        raise HTTPException(status_code=503, detail="Model class labels are not loaded.")
     top_k = min(top_k, len(classes))
 
     scores, indexes = torch.topk(probabilities, k=top_k)
@@ -207,8 +245,136 @@ def _set_training_status(**updates: Any) -> None:
     training_status.update(updates)
 
 
+def _set_report_state(**updates: Any) -> None:
+    with report_lock:
+        current_training_report.update(updates)
+
+
+def _record_training_event(event: dict[str, Any]) -> None:
+    timestamped = {
+        "timestamp": time.time(),
+        **event,
+    }
+    with report_lock:
+        current_training_report["state"] = training_status.get("state", "running")
+        current_training_report["model_type"] = event.get(
+            "model_type",
+            current_training_report.get("model_type"),
+        )
+        current_training_report["last_event"] = timestamped
+        events = current_training_report.setdefault("events", [])
+        events.append(timestamped)
+        del events[:-100]
+
+        if event.get("event") == "epoch_completed":
+            epoch_history = current_training_report.setdefault("epoch_history", [])
+            epoch_history.append(timestamped)
+            del epoch_history[:-200]
+
+
+def _read_json_file(path: Path) -> dict[str, Any] | list[Any] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _collect_report_jsons(artifacts_dir: Path) -> list[dict[str, Any]]:
+    if not artifacts_dir.exists() or not artifacts_dir.is_dir():
+        return []
+
+    reports: list[dict[str, Any]] = []
+    for path in sorted(artifacts_dir.rglob("*.json")):
+        payload = _read_json_file(path)
+        if payload is None:
+            continue
+        reports.append(
+            {
+                "name": path.name,
+                "path": str(path),
+                "relative_path": str(path.relative_to(artifacts_dir)),
+                "content": payload,
+            }
+        )
+    return reports
+
+
+def _artifact_file_index(artifacts_dir: Path) -> list[dict[str, Any]]:
+    if not artifacts_dir.exists() or not artifacts_dir.is_dir():
+        return []
+
+    files: list[dict[str, Any]] = []
+    for path in sorted(artifacts_dir.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in ARTIFACT_EXTENSIONS:
+            continue
+        try:
+            size_bytes = path.stat().st_size
+        except OSError:
+            size_bytes = None
+        files.append(
+            {
+                "name": path.name,
+                "path": str(path),
+                "relative_path": str(path.relative_to(artifacts_dir)),
+                "suffix": path.suffix.lower(),
+                "size_bytes": size_bytes,
+            }
+        )
+    return files
+
+
+def _build_current_report(artifacts_dir: Path | None = None) -> dict[str, Any]:
+    with report_lock:
+        live_report = {
+            key: value
+            for key, value in current_training_report.items()
+        }
+    selected_artifacts_dir = artifacts_dir
+    if selected_artifacts_dir is None and live_report.get("artifacts_dir"):
+        selected_artifacts_dir = Path(str(live_report["artifacts_dir"])).expanduser().resolve()
+    if selected_artifacts_dir is None:
+        selected_artifacts_dir = _artifacts_dir()
+
+    return {
+        "purpose": "Model comparison and research documentation",
+        "generated_at_unix": time.time(),
+        "loaded_model": {
+            "model_type": loaded_model_type,
+            "checkpoint": str(_checkpoint_path()),
+            "model_loaded": model is not None,
+            "model_load_error": model_load_error,
+            "classes": [
+                {
+                    "index": index,
+                    **_decode_class_name(class_name),
+                }
+                for index, class_name in enumerate(classes)
+            ],
+            "image_size": image_size,
+            "device": str(device),
+        },
+        "training": {
+            "status": training_status,
+            "live_report": live_report,
+        },
+        "artifacts": {
+            "dir": str(selected_artifacts_dir),
+            "files": _artifact_file_index(selected_artifacts_dir),
+            "json_reports": _collect_report_jsons(selected_artifacts_dir),
+        },
+    }
+
+
 def _run_training_job(request: TrainingRequest) -> None:
     try:
+        _set_report_state(
+            state="running",
+            model_type=request.model_type,
+            request=request.dict(),
+            artifacts_dir=request.output_dir,
+            events=[],
+            epoch_history=[],
+        )
         _set_training_status(
             state="running",
             message="Training is running.",
@@ -233,6 +399,9 @@ def _run_training_job(request: TrainingRequest) -> None:
             preprocess_device=request.preprocess_device,
             preprocess_workers=request.preprocess_workers,
             perform_preprocess=request.perform_preprocess,
+            model_type=request.model_type,
+            yolo_weights=request.yolo_weights,
+            progress_callback=_record_training_event,
         )
 
         eval_summary = test_for_colab(
@@ -240,10 +409,14 @@ def _run_training_job(request: TrainingRequest) -> None:
             checkpoint_path=train_summary.checkpoint_path,
             batch_size=request.batch_size,
             workers=request.workers,
+            model_type=train_summary.model_type,
         )
 
         os.environ["MODEL_CHECKPOINT"] = train_summary.checkpoint_path
-        _load_model()
+        _load_model(
+            checkpoint_path=Path(train_summary.checkpoint_path),
+            model_type=train_summary.model_type,
+        )
 
         _set_training_status(
             state="completed",
@@ -252,6 +425,18 @@ def _run_training_job(request: TrainingRequest) -> None:
             train_summary=_summary_to_dict(train_summary),
             eval_summary=_summary_to_dict(eval_summary),
             checkpoint_path=train_summary.checkpoint_path,
+            model_type=train_summary.model_type,
+            android_artifact_path=train_summary.android_artifact_path,
+            onnx_artifact_path=train_summary.onnx_artifact_path,
+            android_metadata_path=train_summary.android_metadata_path,
+        )
+        _set_report_state(
+            state="completed",
+            preprocess_summary=_summary_to_dict(prep_summary),
+            train_summary=_summary_to_dict(train_summary),
+            eval_summary=_summary_to_dict(eval_summary),
+            checkpoint_path=train_summary.checkpoint_path,
+            artifacts_dir=request.output_dir,
         )
     except Exception as exc:
         _set_training_status(
@@ -259,32 +444,75 @@ def _run_training_job(request: TrainingRequest) -> None:
             message="Training failed.",
             error=f"{type(exc).__name__}: {exc}",
         )
+        _set_report_state(
+            state="failed",
+            error=f"{type(exc).__name__}: {exc}",
+            artifacts_dir=request.output_dir,
+        )
     finally:
         training_lock.release()
 
 
-def _load_model() -> None:
-    global model, classes, image_size, model_load_error
+def _load_model(
+    checkpoint_path: Path | None = None,
+    model_type: str | None = None,
+) -> None:
+    global model, loaded_model_type, classes, image_size, model_load_error
 
-    checkpoint_path = _checkpoint_path()
+    checkpoint_path = checkpoint_path or _checkpoint_path()
     if not checkpoint_path.exists():
         raise FileNotFoundError(
             f"Checkpoint not found: {checkpoint_path}. "
             "Train first, or set MODEL_CHECKPOINT=/path/to/best_model.pt."
         )
 
+    requested_model_type = model_type or _infer_model_type(checkpoint_path)
+    if requested_model_type == "yolov8":
+        try:
+            from ultralytics import YOLO
+        except ImportError as exc:
+            raise RuntimeError(
+                "YOLOv8 inference requires the optional 'ultralytics' package. "
+                "Install it with: pip install ultralytics"
+            ) from exc
+
+        loaded_model = YOLO(str(checkpoint_path))
+        yolo_names = getattr(loaded_model, "names", {})
+        classes = [
+            name
+            for _, name in sorted(yolo_names.items(), key=lambda item: int(item[0]))
+        ]
+        image_size = int(os.getenv("MODEL_IMAGE_SIZE", "224"))
+        model = loaded_model
+        loaded_model_type = "yolov8"
+        model_load_error = None
+        return
+
+    if requested_model_type != "resnet18":
+        raise ValueError("model_type must be 'resnet18' or 'yolov8'.")
+
     checkpoint = torch.load(checkpoint_path, map_location=device)
     classes = list(checkpoint["classes"])
     image_size = int(checkpoint["image_size"])
 
-    loaded_model = models.resnet18(weights=None)
-    loaded_model.fc = nn.Linear(loaded_model.fc.in_features, len(classes))
+    loaded_model = _build_resnet18(num_classes=len(classes), pretrained=False)
     loaded_model.load_state_dict(checkpoint["model_state_dict"])
     loaded_model.to(device)
     loaded_model.eval()
 
     model = loaded_model
+    loaded_model_type = "resnet18"
     model_load_error = None
+
+
+def _infer_model_type(checkpoint_path: Path) -> str:
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        if isinstance(checkpoint, dict):
+            return str(checkpoint.get("model_type", "resnet18"))
+    except Exception:
+        pass
+    return "yolov8"
 
 
 @app.on_event("startup")
@@ -305,6 +533,57 @@ def health() -> dict[str, Any]:
         "model_load_error": model_load_error,
         "device": str(device),
         "checkpoint": str(_checkpoint_path()),
+        "model_type": loaded_model_type,
+        "classes": len(classes),
+        "image_size": image_size,
+    }
+
+
+@app.get("/models")
+def list_supported_models() -> dict[str, Any]:
+    return {
+        "supported_models": [
+            {
+                "model_type": "resnet18",
+                "training_endpoint": "/training/start",
+                "checkpoint": "PyTorch .pt",
+                "android_exports": ["resnet18_android.ptl", "resnet18_android.onnx"],
+            },
+            {
+                "model_type": "yolov8",
+                "training_endpoint": "/training/start",
+                "checkpoint": "Ultralytics YOLOv8 .pt",
+                "android_exports": ["best.onnx"],
+            },
+        ],
+        "loaded_model_type": loaded_model_type,
+    }
+
+
+@app.get("/reports/current")
+def current_model_report(artifacts_dir: str | None = None) -> dict[str, Any]:
+    selected_artifacts_dir = (
+        Path(artifacts_dir).expanduser().resolve()
+        if artifacts_dir is not None
+        else None
+    )
+    return _build_current_report(artifacts_dir=selected_artifacts_dir)
+
+
+@app.post("/models/load")
+def load_model_endpoint(request: ModelLoadRequest) -> dict[str, Any]:
+    if request.model_type is not None and request.model_type not in SUPPORTED_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail="model_type must be 'resnet18' or 'yolov8'.",
+        )
+    checkpoint_path = Path(request.checkpoint_path).expanduser().resolve()
+    _load_model(checkpoint_path=checkpoint_path, model_type=request.model_type)
+    os.environ["MODEL_CHECKPOINT"] = str(checkpoint_path)
+    return {
+        "message": "Model loaded.",
+        "checkpoint_path": str(checkpoint_path),
+        "model_type": loaded_model_type,
         "classes": len(classes),
         "image_size": image_size,
     }
@@ -353,6 +632,11 @@ def start_training(
         raise HTTPException(
             status_code=400,
             detail="preprocess_device must be 'auto', 'cuda', or 'cpu'.",
+        )
+    if request.model_type not in SUPPORTED_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail="model_type must be 'resnet18' or 'yolov8'.",
         )
 
     if not training_lock.acquire(blocking=False):

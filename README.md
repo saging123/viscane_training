@@ -3,8 +3,8 @@
 This project now includes a complete CLI pipeline to:
 1. validate/clean your folder-by-variety dataset,
 2. split it into `train/val/test`,
-3. train a classifier (ResNet18 transfer learning),
-4. save model + metrics.
+3. train a classifier with either ResNet18 or YOLOv8,
+4. save model, metrics, and Android-friendly exports.
 
 ## 1) Dataset structure (raw)
 
@@ -73,10 +73,26 @@ python main.py preprocess-flat \
 ```bash
 python main.py train \
   --prepared-dir data/prepared \
-  --output-dir artifacts \
+  --output-dir artifacts/resnet18 \
+  --model-type resnet18 \
   --epochs 25 \
   --batch-size 32 \
   --lr 0.001 \
+  --image-size 224 \
+  --workers 4 \
+  --seed 42
+```
+
+Train YOLOv8 classification on the same prepared split:
+
+```bash
+python main.py train \
+  --prepared-dir data/prepared \
+  --output-dir artifacts/yolov8 \
+  --model-type yolov8 \
+  --yolo-weights yolov8n-cls.pt \
+  --epochs 25 \
+  --batch-size 32 \
   --image-size 224 \
   --workers 4 \
   --seed 42
@@ -96,13 +112,25 @@ python main.py test \
   --workers 4
 ```
 
+For YOLOv8 checkpoints, pass the model type:
+
+```bash
+python main.py test \
+  --prepared-dir data/prepared \
+  --checkpoint-path artifacts/yolov8/yolov8/weights/best.pt \
+  --model-type yolov8 \
+  --batch-size 32 \
+  --workers 4
+```
+
 ### End-to-end (preprocess + train)
 
 ```bash
 python main.py all \
   --raw-dir /path/to/your_raw_dataset \
   --prepared-dir data/prepared \
-  --output-dir artifacts \
+  --output-dir artifacts/resnet18 \
+  --model-type resnet18 \
   --val-ratio 0.15 \
   --test-ratio 0.15 \
   --label-mode variety_maturity \
@@ -135,7 +163,13 @@ python main.py all \
 
 ## Output artifacts
 
-- `artifacts/best_model.pt`: best checkpoint (by validation accuracy)
+- `artifacts/resnet18/best_model.pt`: ResNet18 checkpoint (by validation accuracy)
+- `artifacts/resnet18/resnet18_android.ptl`: PyTorch Lite artifact for Android
+- `artifacts/resnet18/resnet18_android.onnx`: ONNX export for Android runtimes
+- `artifacts/resnet18/resnet18_android_metadata.json`: Android preprocessing and labels
+- `artifacts/yolov8/yolov8/weights/best.pt`: YOLOv8 classification checkpoint
+- `artifacts/yolov8/yolov8/weights/best.onnx`: YOLOv8 ONNX export when export succeeds
+- `artifacts/yolov8/yolov8_android_metadata.json`: Android preprocessing and labels
 - `artifacts/metrics.json`: classes and training metrics
 
 ## Serve the Trained Model as a FastAPI API
@@ -168,6 +202,9 @@ http://localhost:8000/docs
 Useful endpoints:
 
 - `GET /health`: check whether the model loaded.
+- `GET /models`: list supported model pipelines and Android export formats.
+- `POST /models/load`: load a specific ResNet18 or YOLOv8 checkpoint.
+- `GET /reports/current`: get live training progress and saved research reports.
 - `GET /classes`: list class labels.
 - `POST /predict`: upload one image and get the predicted sugarcane class.
 - `POST /training/start`: start preprocessing/training in the background.
@@ -183,10 +220,38 @@ curl -X POST "http://localhost:8000/training/start" \
     "raw_dir": "content/data/raw",
     "prepared_dir": "content/data/prepared",
     "output_dir": "content/data/sugarcane_artifacts",
+    "model_type": "resnet18",
     "label_mode": "variety_maturity",
     "epochs": 25,
     "batch_size": 32,
     "perform_preprocess": true
+}'
+```
+
+Start YOLOv8 training through the API while reusing an existing prepared split:
+
+```bash
+curl -X POST "http://localhost:8000/training/start" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prepared_dir": "content/data/prepared",
+    "output_dir": "content/data/sugarcane_artifacts/yolov8",
+    "model_type": "yolov8",
+    "yolo_weights": "yolov8n-cls.pt",
+    "epochs": 25,
+    "batch_size": 32,
+    "perform_preprocess": false
+  }'
+```
+
+Load a specific checkpoint for prediction:
+
+```bash
+curl -X POST "http://localhost:8000/models/load" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "checkpoint_path": "content/data/sugarcane_artifacts/yolov8/yolov8/weights/best.pt",
+    "model_type": "yolov8"
   }'
 ```
 
@@ -194,6 +259,19 @@ Check training status:
 
 ```bash
 curl "http://localhost:8000/training/status"
+```
+
+Get the current research/comparison report while training is running or after it
+finishes:
+
+```bash
+curl "http://localhost:8000/reports/current"
+```
+
+To read reports from a specific artifact folder:
+
+```bash
+curl "http://localhost:8000/reports/current?artifacts_dir=content/data/sugarcane_artifacts/yolov8"
 ```
 
 Example prediction request:
@@ -289,10 +367,29 @@ prep, train = run_all_for_colab(
     batch_size=32,
     image_size=224,
     workers=2,
+    model_type="resnet18",
 )
 
 print(prep)
 print(train)
+```
+
+To compare with YOLOv8 without repeating preprocessing:
+
+```python
+_, yolo_train = run_all_for_colab(
+    raw_dir="/content/drive/MyDrive/sugarcane_raw",
+    prepared_dir="/content/data/prepared",
+    output_dir="/content/drive/MyDrive/sugarcane_artifacts/yolov8",
+    label_mode="variety_maturity",
+    perform_preprocess=False,
+    model_type="yolov8",
+    yolo_weights="yolov8n-cls.pt",
+    epochs=25,
+    batch_size=32,
+    image_size=224,
+    workers=2,
+)
 ```
 
 Test again later in Colab (without retraining):
