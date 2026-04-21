@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,7 @@ from torchvision.models import ResNet18_Weights
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
+DEFAULT_ONNX_OPSETS = (16, 17)
 ModelType = Literal["resnet18", "yolov8"]
 ProgressCallback = Callable[[Dict[str, Any]], None]
 
@@ -257,6 +259,57 @@ def _build_resnet18(num_classes: int, pretrained: bool) -> nn.Module:
     return model
 
 
+def _get_onnx_export_opsets() -> tuple[int, ...]:
+    raw_value = os.getenv("ONNX_EXPORT_OPSETS", "")
+    if not raw_value.strip():
+        return DEFAULT_ONNX_OPSETS
+
+    parsed: list[int] = []
+    for chunk in raw_value.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            parsed.append(int(chunk))
+        except ValueError:
+            print(f"Ignoring invalid ONNX opset value: {chunk!r}")
+
+    return tuple(parsed) or DEFAULT_ONNX_OPSETS
+
+
+def _export_onnx_with_opset_fallback(
+    model: nn.Module,
+    example: torch.Tensor,
+    target_path: Path,
+) -> str | None:
+    last_error: Exception | None = None
+    for opset_version in _get_onnx_export_opsets():
+        try:
+            torch.onnx.export(
+                model,
+                example,
+                str(target_path),
+                input_names=["images"],
+                output_names=["logits"],
+                dynamic_axes={
+                    "images": {0: "batch"},
+                    "logits": {0: "batch"},
+                },
+                opset_version=opset_version,
+            )
+            return str(target_path)
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"ONNX export failed with opset {opset_version}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    if last_error is not None:
+        print(f"Skipping ONNX export after all opset attempts failed: {type(last_error).__name__}: {last_error}")
+    return None
+
+
 def _export_resnet18_android_artifacts(
     model: nn.Module,
     out_dir: Path,
@@ -280,22 +333,11 @@ def _export_resnet18_android_artifacts(
     except Exception as exc:
         print(f"Skipping ResNet18 Android Lite export: {type(exc).__name__}: {exc}")
 
-    try:
-        torch.onnx.export(
-            model_cpu,
-            example,
-            str(onnx_path),
-            input_names=["images"],
-            output_names=["logits"],
-            dynamic_axes={
-                "images": {0: "batch"},
-                "logits": {0: "batch"},
-            },
-            opset_version=17,
-        )
-        onnx_artifact_path = str(onnx_path)
-    except Exception as exc:
-        print(f"Skipping ResNet18 ONNX export: {type(exc).__name__}: {exc}")
+    onnx_artifact_path = _export_onnx_with_opset_fallback(
+        model=model_cpu,
+        example=example,
+        target_path=onnx_path,
+    )
 
     return android_artifact_path, onnx_artifact_path
 
@@ -312,23 +354,11 @@ def _export_yolov8_onnx_fallback(
 
     model_cpu = model.to("cpu").eval()
     example = torch.randn(1, 3, image_size, image_size)
-    try:
-        torch.onnx.export(
-            model_cpu,
-            example,
-            str(onnx_path),
-            input_names=["images"],
-            output_names=["logits"],
-            dynamic_axes={
-                "images": {0: "batch"},
-                "logits": {0: "batch"},
-            },
-            opset_version=17,
-        )
-        return str(onnx_path)
-    except Exception as exc:
-        print(f"Skipping YOLOv8 fallback ONNX export: {type(exc).__name__}: {exc}")
-        return None
+    return _export_onnx_with_opset_fallback(
+        model=model_cpu,
+        example=example,
+        target_path=onnx_path,
+    )
 
 
 def _write_android_metadata(
