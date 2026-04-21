@@ -284,6 +284,37 @@ def _export_resnet18_android_artifacts(
     return android_artifact_path, onnx_artifact_path
 
 
+def _export_yolov8_onnx_fallback(
+    best_model: Any,
+    out_dir: Path,
+    image_size: int,
+) -> str | None:
+    onnx_path = out_dir / "best.onnx"
+    model = getattr(best_model, "model", None)
+    if model is None:
+        return None
+
+    model_cpu = model.to("cpu").eval()
+    example = torch.randn(1, 3, image_size, image_size)
+    try:
+        torch.onnx.export(
+            model_cpu,
+            example,
+            str(onnx_path),
+            input_names=["images"],
+            output_names=["logits"],
+            dynamic_axes={
+                "images": {0: "batch"},
+                "logits": {0: "batch"},
+            },
+            opset_version=17,
+        )
+        return str(onnx_path)
+    except Exception as exc:
+        print(f"Skipping YOLOv8 fallback ONNX export: {type(exc).__name__}: {exc}")
+        return None
+
+
 def _write_android_metadata(
     out_dir: Path,
     model_type: str,
@@ -626,7 +657,12 @@ def _run_yolov8_training(
         exported = best_model.export(format="onnx", imgsz=image_size)
         onnx_artifact_path = str(exported)
     except Exception as exc:
-        print(f"Skipping YOLOv8 ONNX export: {type(exc).__name__}: {exc}")
+        print(f"Ultralytics YOLOv8 ONNX export failed: {type(exc).__name__}: {exc}")
+        onnx_artifact_path = _export_yolov8_onnx_fallback(
+            best_model=best_model,
+            out_dir=save_dir / "weights",
+            image_size=image_size,
+        )
     android_metadata_path = _write_android_metadata(
         out_dir=out_dir,
         model_type="yolov8",
