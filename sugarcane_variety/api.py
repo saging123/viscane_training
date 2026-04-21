@@ -22,6 +22,7 @@ from sugarcane_variety.train import (
     _build_resnet18,
     _decode_class_name,
     _prepare_images_on_device,
+    _raise_ultralytics_dependency_error,
 )
 from sugarcane_variety.colab_compatible import run_all_for_colab, test_for_colab
 
@@ -471,10 +472,7 @@ def _load_model(
         try:
             from ultralytics import YOLO
         except ImportError as exc:
-            raise RuntimeError(
-                "YOLOv8 inference requires the optional 'ultralytics' package. "
-                "Install it with: pip install ultralytics"
-            ) from exc
+            _raise_ultralytics_dependency_error("inference", exc)
 
         loaded_model = YOLO(str(checkpoint_path))
         yolo_names = getattr(loaded_model, "names", {})

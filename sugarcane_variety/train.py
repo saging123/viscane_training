@@ -53,6 +53,22 @@ class EvalSummary:
     model_type: str = "resnet18"
 
 
+def _raise_ultralytics_dependency_error(action: str, exc: ImportError) -> None:
+    message = str(exc)
+    if "libGL.so.1" in message:
+        raise RuntimeError(
+            f"YOLOv8 {action} could not import OpenCV because libGL.so.1 is missing. "
+            "This usually happens on headless or Termux-backed environments. "
+            "Install the missing system library (for Debian/Ubuntu: sudo apt install -y libgl1 libglib2.0-0) "
+            "or switch to a headless OpenCV build."
+        ) from exc
+    raise RuntimeError(
+        f"YOLOv8 {action} requires the optional 'ultralytics' package and its native dependencies. "
+        f"Install them with: pip install ultralytics opencv-python-headless. "
+        f"Original import error: {type(exc).__name__}: {exc}"
+    ) from exc
+
+
 def _decode_class_name(class_name: str) -> Dict[str, str]:
     if "__" in class_name:
         variety, maturity = class_name.split("__", 1)
@@ -562,10 +578,7 @@ def _run_yolov8_training(
     try:
         from ultralytics import YOLO
     except ImportError as exc:
-        raise RuntimeError(
-            "YOLOv8 training requires the optional 'ultralytics' package. "
-            "Install it with: pip install ultralytics"
-        ) from exc
+        _raise_ultralytics_dependency_error("training", exc)
 
     _set_seed(seed)
     data_dir = Path(prepared_dir).expanduser().resolve()
@@ -1020,10 +1033,7 @@ def _run_yolov8_evaluation(
     try:
         from ultralytics import YOLO
     except ImportError as exc:
-        raise RuntimeError(
-            "YOLOv8 evaluation requires the optional 'ultralytics' package. "
-            "Install it with: pip install ultralytics"
-        ) from exc
+        _raise_ultralytics_dependency_error("evaluation", exc)
 
     data_dir = Path(prepared_dir).expanduser().resolve()
     ckpt_path = Path(checkpoint_path).expanduser().resolve()
