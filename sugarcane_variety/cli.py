@@ -48,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument(
         "--preprocess-workers",
         type=int,
-        default=1,
+        default=8,
         help="CPU workers for image validation and preprocessing.",
     )
 
@@ -83,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     prep_flat.add_argument(
         "--preprocess-workers",
         type=int,
-        default=1,
+        default=8,
         help="CPU workers for image validation and preprocessing.",
     )
 
@@ -137,7 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--weight-decay", type=float, default=5e-4, help="Weight decay for AdamW."
     )
     train.add_argument("--image-size", type=int, default=224, help="Input size.")
-    train.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
+    train.add_argument("--workers", type=int, default=8, help="DataLoader workers.")
     train.add_argument("--seed", type=int, default=42, help="Random seed.")
     train.add_argument(
         "--augment-validation",
@@ -205,7 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to trained checkpoint.",
     )
     test.add_argument("--batch-size", type=int, default=32, help="Batch size.")
-    test.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
+    test.add_argument("--workers", type=int, default=8, help="DataLoader workers.")
     test.add_argument(
         "--model-type",
         choices=["resnet18", "yolov8"],
@@ -240,7 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--weight-decay", type=float, default=5e-4, help="Weight decay for AdamW."
     )
     all_cmd.add_argument("--image-size", type=int, default=224, help="Input size.")
-    all_cmd.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
+    all_cmd.add_argument("--workers", type=int, default=8, help="DataLoader workers.")
     all_cmd.add_argument("--seed", type=int, default=42, help="Random seed.")
     all_cmd.add_argument(
         "--augment-validation",
@@ -314,7 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument(
         "--preprocess-workers",
         type=int,
-        default=1,
+        default=8,
         help="CPU workers for image validation and preprocessing.",
     )
     all_cmd.add_argument(

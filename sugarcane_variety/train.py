@@ -524,7 +524,7 @@ def _run_resnet18_training(
     lr: float = DEFAULT_TRAIN_LR,
     weight_decay: float = DEFAULT_TRAIN_WEIGHT_DECAY,
     image_size: int = 224,
-    workers: int = 4,
+    workers: int = 8,
     seed: int = 42,
     augment_validation: bool = False,
     noise_std: float = DEFAULT_TRAIN_NOISE_STD,
@@ -805,7 +805,7 @@ def _run_yolov8_training(
     lr: float = DEFAULT_TRAIN_LR,
     weight_decay: float = DEFAULT_TRAIN_WEIGHT_DECAY,
     image_size: int = 224,
-    workers: int = 4,
+    workers: int = 8,
     seed: int = 42,
     yolo_weights: str = "yolov8n-cls.pt",
     early_stopping_patience: int = DEFAULT_EARLY_STOPPING_PATIENCE,
@@ -1058,7 +1058,7 @@ def run_training(
     lr: float = DEFAULT_TRAIN_LR,
     weight_decay: float = DEFAULT_TRAIN_WEIGHT_DECAY,
     image_size: int = 224,
-    workers: int = 4,
+    workers: int = 8,
     seed: int = 42,
     augment_validation: bool = False,
     noise_std: float = DEFAULT_TRAIN_NOISE_STD,
@@ -1115,7 +1115,7 @@ def run_evaluation(
     prepared_dir: str,
     checkpoint_path: str,
     batch_size: int = 32,
-    workers: int = 4,
+    workers: int = 8,
     model_type: ModelType | None = None,
 ) -> EvalSummary:
     data_dir = Path(prepared_dir).expanduser().resolve()
@@ -1331,7 +1331,7 @@ def _run_yolov8_evaluation(
     prepared_dir: str,
     checkpoint_path: str,
     batch_size: int = 32,
-    workers: int = 4,
+    workers: int = 8,
 ) -> EvalSummary:
     try:
         from ultralytics import YOLO

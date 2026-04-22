@@ -35,7 +35,7 @@ def preprocess_for_colab(
     resize: int | None = 256,
     label_mode: str = "variety",
     preprocess_device: str = "auto",
-    preprocess_workers: int = 1,
+    preprocess_workers: int = 8,
 ) -> PreprocessSummary:
     """Run preprocessing with Colab-friendly defaults."""
     return run_preprocess(
@@ -59,7 +59,7 @@ def train_for_colab(
     lr: float = 5e-4,
     weight_decay: float = 5e-4,
     image_size: int = 224,
-    workers: int = 2,
+    workers: int = 8,
     seed: int = 42,
     augment_validation: bool = False,
     noise_std: float = 0.07,
@@ -102,7 +102,7 @@ def test_for_colab(
     prepared_dir: str = "/content/data/prepared",
     checkpoint_path: str = "/content/artifacts/best_model.pt",
     batch_size: int = 32,
-    workers: int = 2,
+    workers: int = 8,
     model_type: str | None = None,
 ) -> EvalSummary:
     """Run test-only evaluation in Colab."""
@@ -153,7 +153,7 @@ def run_all_for_colab(
     lr: float = 5e-4,
     weight_decay: float = 5e-4,
     image_size: int = 224,
-    workers: int = 2,
+    workers: int = 8,
     seed: int = 42,
     augment_validation: bool = False,
     noise_std: float = 0.07,
@@ -165,7 +165,7 @@ def run_all_for_colab(
     use_class_weights: bool = True,
     label_mode: str = "variety",
     preprocess_device: str = "auto",
-    preprocess_workers: int = 1,
+    preprocess_workers: int = 8,
     perform_preprocess: bool = True,
     model_type: str = "resnet18",
     yolo_weights: str = "yolov8n-cls.pt",
