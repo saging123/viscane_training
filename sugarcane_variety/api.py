@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import io
 import json
 import os
@@ -9,11 +10,12 @@ import zipfile
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import torch
 import torch.nn.functional as F
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from PIL import Image, ImageDraw, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from torchvision import transforms
@@ -31,6 +33,7 @@ DEFAULT_ARTIFACTS_DIR = "content/data/sugarcane_artifacts"
 DEFAULT_RESNET_CHECKPOINT_PATH = "content/data/sugarcane_artifacts/resnet18/best_model.pt"
 DEFAULT_YOLO_CHECKPOINT_PATH = "content/data/sugarcane_artifacts/yolov8/yolov8/weights/best.pt"
 ARTIFACT_EXTENSIONS = {".pt", ".ptl", ".onnx", ".json"}
+VISUAL_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 SUPPORTED_MODELS = {"resnet18", "yolov8"}
 
 
@@ -230,6 +233,13 @@ def _artifacts_dir() -> Path:
     return Path(os.getenv("ARTIFACTS_DIR", DEFAULT_ARTIFACTS_DIR)).expanduser().resolve()
 
 
+def _model_artifacts_dir(model_type: str) -> Path:
+    base_dir = _artifacts_dir()
+    if model_type == "yolov8":
+        return base_dir / "yolov8"
+    return base_dir / "resnet18"
+
+
 def _build_artifacts_zip(artifacts_dir: Path) -> io.BytesIO:
     if not artifacts_dir.exists() or not artifacts_dir.is_dir():
         raise HTTPException(
@@ -302,6 +312,400 @@ def _read_json_file(path: Path) -> dict[str, Any] | list[Any] | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _find_report_file(artifacts_dir: Path, name: str) -> Path | None:
+    candidate = artifacts_dir / name
+    if candidate.exists():
+        return candidate
+    matches = sorted(artifacts_dir.rglob(name))
+    return matches[0] if matches else None
+
+
+def _collect_visual_assets(artifacts_dir: Path) -> list[Path]:
+    if not artifacts_dir.exists() or not artifacts_dir.is_dir():
+        return []
+    return sorted(
+        path
+        for path in artifacts_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in VISUAL_EXTENSIONS
+    )[:24]
+
+
+def _format_metric_value(value: Any) -> str:
+    if isinstance(value, float):
+        if 0.0 <= value <= 1.0:
+            return f"{value:.2%}"
+        return f"{value:.4f}"
+    if value is None:
+        return "n/a"
+    if isinstance(value, list):
+        return str(len(value))
+    return str(value)
+
+
+def _render_definition_rows(data: dict[str, Any], keys: list[tuple[str, str]]) -> str:
+    rows: list[str] = []
+    for label, key in keys:
+        if key not in data:
+            continue
+        rows.append(
+            f"<tr><th>{html.escape(label)}</th><td>{html.escape(_format_metric_value(data.get(key)))}</td></tr>"
+        )
+    if not rows:
+        return "<tr><td colspan='2'>No metrics available.</td></tr>"
+    return "".join(rows)
+
+
+def _render_epoch_history_table(model_type: str) -> str:
+    with report_lock:
+        live_model_type = str(current_training_report.get("model_type", ""))
+        epoch_history = list(current_training_report.get("epoch_history", []))
+
+    if live_model_type != model_type or not epoch_history:
+        return "<p class='muted'>No live epoch history is available for this model in the current API session.</p>"
+
+    header = (
+        "<tr><th>Epoch</th><th>Train Loss</th><th>Train Acc</th>"
+        "<th>Val Loss</th><th>Val Acc</th><th>Best Val Acc</th></tr>"
+    )
+    rows: list[str] = []
+    for item in epoch_history[-20:]:
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(item.get('epoch', 'n/a')))}</td>"
+            f"<td>{html.escape(_format_metric_value(item.get('train_loss')))}</td>"
+            f"<td>{html.escape(_format_metric_value(item.get('train_acc')))}</td>"
+            f"<td>{html.escape(_format_metric_value(item.get('val_loss')))}</td>"
+            f"<td>{html.escape(_format_metric_value(item.get('val_acc')))}</td>"
+            f"<td>{html.escape(_format_metric_value(item.get('best_val_acc')))}</td>"
+            "</tr>"
+        )
+    return f"<table><thead>{header}</thead><tbody>{''.join(rows)}</tbody></table>"
+
+
+def _render_top_confusions(test_summary: dict[str, Any] | None) -> str:
+    if not isinstance(test_summary, dict):
+        return "<p class='muted'>No test summary available.</p>"
+    confusions = test_summary.get("top_confusions")
+    if not isinstance(confusions, list) or not confusions:
+        return "<p class='muted'>No confusion pairs were recorded for this model.</p>"
+
+    rows: list[str] = []
+    for row in confusions[:10]:
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(row.get('true_class', 'n/a')))}</td>"
+            f"<td>{html.escape(str(row.get('predicted_class', 'n/a')))}</td>"
+            f"<td>{html.escape(str(row.get('count', 'n/a')))}</td>"
+            "</tr>"
+        )
+    return (
+        "<table><thead><tr><th>True Class</th><th>Predicted Class</th><th>Count</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
+def _render_per_class_table(test_summary: dict[str, Any] | None) -> str:
+    if not isinstance(test_summary, dict):
+        return "<p class='muted'>No per-class metrics are available.</p>"
+    per_class = test_summary.get("per_class")
+    if not isinstance(per_class, list) or not per_class:
+        return "<p class='muted'>This model did not save per-class metrics.</p>"
+
+    rows: list[str] = []
+    for row in per_class[:12]:
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(row.get('class_name', 'n/a')))}</td>"
+            f"<td>{html.escape(_format_metric_value(row.get('accuracy')))}</td>"
+            f"<td>{html.escape(str(row.get('support', 'n/a')))}</td>"
+            "</tr>"
+        )
+    return (
+        "<table><thead><tr><th>Class</th><th>Accuracy</th><th>Support</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
+def _render_visual_gallery(model_type: str, artifacts_dir: Path) -> str:
+    visuals = _collect_visual_assets(artifacts_dir)
+    if not visuals:
+        return "<p class='muted'>No image assets were found in this artifact folder.</p>"
+
+    cards: list[str] = []
+    for path in visuals:
+        rel_path = path.relative_to(artifacts_dir)
+        asset_url = f"/reports/assets/{model_type}/{quote(str(rel_path), safe='/')}"
+        cards.append(
+            "<figure class='visual-card'>"
+            f"<img src='{asset_url}' alt='{html.escape(path.name)}' loading='lazy' />"
+            f"<figcaption>{html.escape(str(rel_path))}</figcaption>"
+            "</figure>"
+        )
+    return f"<div class='visual-grid'>{''.join(cards)}</div>"
+
+
+def _build_model_doc_payload(model_type: str) -> dict[str, Any]:
+    artifacts_dir = _model_artifacts_dir(model_type)
+    metrics_path = _find_report_file(artifacts_dir, "metrics.json")
+    test_summary_path = _find_report_file(artifacts_dir, "test_summary.json")
+    android_metadata_path = _find_report_file(artifacts_dir, f"{model_type}_android_metadata.json")
+    metadata = _read_json_file(metrics_path) if metrics_path else None
+    test_summary = _read_json_file(test_summary_path) if test_summary_path else None
+    android_metadata = _read_json_file(android_metadata_path) if android_metadata_path else None
+    return {
+        "model_type": model_type,
+        "artifacts_dir": artifacts_dir,
+        "metrics": metadata if isinstance(metadata, dict) else {},
+        "test_summary": test_summary if isinstance(test_summary, dict) else {},
+        "android_metadata": android_metadata if isinstance(android_metadata, dict) else {},
+    }
+
+
+def _render_model_doc_section(model_type: str) -> str:
+    payload = _build_model_doc_payload(model_type)
+    metrics = payload["metrics"]
+    test_summary = payload["test_summary"]
+    android_metadata = payload["android_metadata"]
+    artifacts_dir = payload["artifacts_dir"]
+    status = "Loaded" if loaded_models.get(model_type) is not None else "Unavailable"
+    error_text = model_load_errors.get(model_type)
+
+    metric_rows = _render_definition_rows(
+        metrics,
+        [
+            ("Best Validation Accuracy", "best_val_acc"),
+            ("Test Accuracy", "test_acc"),
+            ("Epochs", "epochs"),
+            ("Batch Size", "batch_size"),
+            ("Learning Rate", "learning_rate"),
+            ("Weight Decay", "weight_decay"),
+            ("Image Size", "image_size"),
+            ("Checkpoint Path", "checkpoint_path"),
+        ],
+    )
+    test_rows = _render_definition_rows(
+        test_summary,
+        [
+            ("Test Accuracy", "test_acc"),
+            ("Variety Accuracy", "variety_acc"),
+            ("Maturity Accuracy", "maturity_acc"),
+            ("Samples", "num_samples"),
+            ("Friendly Outcome", "friendly_outcome"),
+        ],
+    )
+    android_rows = _render_definition_rows(
+        android_metadata,
+        [
+            ("Android Artifact", "android_artifact_path"),
+            ("ONNX Artifact", "onnx_artifact_path"),
+            ("Image Size", "image_size"),
+        ],
+    )
+
+    return f"""
+    <section class="model-section">
+      <div class="section-header">
+        <h2>{html.escape(model_type.upper())}</h2>
+        <span class="status {'loaded' if loaded_models.get(model_type) is not None else 'failed'}">{html.escape(status)}</span>
+      </div>
+      <p><strong>Checkpoint:</strong> {html.escape(str(model_checkpoints.get(model_type, _model_checkpoint_path(model_type))))}</p>
+      <p><strong>Artifacts Directory:</strong> {html.escape(str(artifacts_dir))}</p>
+      <p><strong>Load Error:</strong> {html.escape(error_text or 'none')}</p>
+      <div class="doc-grid">
+        <article class="card">
+          <h3>Training Summary</h3>
+          <table><tbody>{metric_rows}</tbody></table>
+        </article>
+        <article class="card">
+          <h3>Evaluation Summary</h3>
+          <table><tbody>{test_rows}</tbody></table>
+        </article>
+        <article class="card">
+          <h3>Android / Deployment Metadata</h3>
+          <table><tbody>{android_rows}</tbody></table>
+        </article>
+      </div>
+      <article class="card">
+        <h3>Training and Validation History</h3>
+        { _render_epoch_history_table(model_type) }
+      </article>
+      <article class="card">
+        <h3>Per-Class Performance</h3>
+        { _render_per_class_table(test_summary) }
+      </article>
+      <article class="card">
+        <h3>Top Confusions</h3>
+        { _render_top_confusions(test_summary) }
+      </article>
+      <article class="card">
+        <h3>Artifact Images</h3>
+        { _render_visual_gallery(model_type, artifacts_dir) }
+      </article>
+    </section>
+    """
+
+
+def _build_technical_documentation_html() -> str:
+    comparison_rows: list[str] = []
+    for model_type in sorted(SUPPORTED_MODELS):
+        payload = _build_model_doc_payload(model_type)
+        metrics = payload["metrics"]
+        test_summary = payload["test_summary"]
+        comparison_rows.append(
+            "<tr>"
+            f"<td>{html.escape(model_type)}</td>"
+            f"<td>{html.escape('loaded' if loaded_models.get(model_type) is not None else 'not loaded')}</td>"
+            f"<td>{html.escape(_format_metric_value(metrics.get('best_val_acc')))}</td>"
+            f"<td>{html.escape(_format_metric_value(test_summary.get('test_acc', metrics.get('test_acc'))))}</td>"
+            f"<td>{html.escape(str(len(model_classes.get(model_type, []))))}</td>"
+            f"<td>{html.escape(str(payload['artifacts_dir']))}</td>"
+            "</tr>"
+        )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sugarcane Model Technical Documentation</title>
+  <style>
+    :root {{
+      --bg: #f3efe5;
+      --panel: #fffaf2;
+      --ink: #1f2a1f;
+      --muted: #5f6b61;
+      --line: #d8cfbf;
+      --accent: #3a6b48;
+      --accent-soft: #dfeadf;
+      --warn: #8a3d2f;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(58,107,72,0.12), transparent 22rem),
+        linear-gradient(180deg, #f7f1e7 0%, var(--bg) 100%);
+    }}
+    main {{ max-width: 1200px; margin: 0 auto; padding: 32px 20px 48px; }}
+    h1, h2, h3 {{ margin: 0 0 12px; line-height: 1.1; }}
+    p {{ line-height: 1.6; }}
+    .hero {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 28px;
+      box-shadow: 0 18px 45px rgba(49, 58, 45, 0.08);
+    }}
+    .hero p {{ color: var(--muted); max-width: 75ch; }}
+    .card {{
+      background: rgba(255, 250, 242, 0.95);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      margin-top: 18px;
+    }}
+    .doc-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+      margin-top: 18px;
+    }}
+    .comparison-table, table {{
+      width: 100%;
+      border-collapse: collapse;
+    }}
+    th, td {{
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }}
+    th {{ width: 32%; color: var(--muted); font-weight: 600; }}
+    .comparison-table th, .comparison-table td {{ width: auto; }}
+    .model-section {{ margin-top: 28px; }}
+    .section-header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }}
+    .status {{
+      display: inline-flex;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 0.9rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }}
+    .status.loaded {{ background: var(--accent-soft); color: var(--accent); }}
+    .status.failed {{ background: #f7d9d2; color: var(--warn); }}
+    .muted {{ color: var(--muted); }}
+    .visual-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+    }}
+    .visual-card {{
+      margin: 0;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+      background: #fff;
+    }}
+    .visual-card img {{
+      width: 100%;
+      display: block;
+      aspect-ratio: 4 / 3;
+      object-fit: cover;
+      background: #ece3d4;
+    }}
+    .visual-card figcaption {{
+      padding: 10px 12px;
+      font-size: 0.92rem;
+      color: var(--muted);
+    }}
+    @media (max-width: 720px) {{
+      main {{ padding: 20px 14px 36px; }}
+      .hero, .card {{ border-radius: 14px; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <h1>Sugarcane Variety Classifier Technical Documentation</h1>
+      <p>
+        This document compares the ResNet18 and YOLOv8 pipelines using the currently configured
+        artifact folders. It summarizes training outcomes, validation and test performance,
+        deployment-ready outputs, and any generated visual evidence stored in the artifact tree.
+      </p>
+      <article class="card">
+        <h2>Model Comparison Overview</h2>
+        <table class="comparison-table">
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Status</th>
+              <th>Best Val Acc</th>
+              <th>Test Acc</th>
+              <th>Loaded Classes</th>
+              <th>Artifacts Directory</th>
+            </tr>
+          </thead>
+          <tbody>{''.join(comparison_rows)}</tbody>
+        </table>
+      </article>
+    </section>
+    {_render_model_doc_section("resnet18")}
+    {_render_model_doc_section("yolov8")}
+  </main>
+</body>
+</html>"""
 
 
 def _collect_report_jsons(artifacts_dir: Path) -> list[dict[str, Any]]:
@@ -630,6 +1034,28 @@ def current_model_report(artifacts_dir: str | None = None) -> dict[str, Any]:
         else None
     )
     return _build_current_report(artifacts_dir=selected_artifacts_dir)
+
+
+@app.get("/reports/technical-documentation", response_class=HTMLResponse)
+@app.get("/reports/model-comparison", response_class=HTMLResponse)
+def technical_documentation() -> HTMLResponse:
+    return HTMLResponse(_build_technical_documentation_html())
+
+
+@app.get("/reports/assets/{model_type}/{asset_path:path}")
+def report_asset(model_type: str, asset_path: str) -> FileResponse:
+    if model_type not in SUPPORTED_MODELS:
+        raise HTTPException(status_code=400, detail="model_type must be 'resnet18' or 'yolov8'.")
+
+    base_dir = _model_artifacts_dir(model_type).resolve()
+    candidate = (base_dir / asset_path).resolve()
+    try:
+        candidate.relative_to(base_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid asset path.") from exc
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail=f"Asset not found: {asset_path}")
+    return FileResponse(candidate)
 
 
 @app.post("/models/load")
