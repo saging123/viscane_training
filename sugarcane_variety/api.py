@@ -27,7 +27,8 @@ from sugarcane_variety.train import (
 from sugarcane_variety.colab_compatible import run_all_for_colab, test_for_colab
 
 
-DEFAULT_RESNET_CHECKPOINT_PATH = "content/data/sugarcane_artifacts/best_model.pt"
+DEFAULT_ARTIFACTS_DIR = "content/data/sugarcane_artifacts"
+DEFAULT_RESNET_CHECKPOINT_PATH = "content/data/sugarcane_artifacts/resnet18/best_model.pt"
 DEFAULT_YOLO_CHECKPOINT_PATH = "content/data/sugarcane_artifacts/yolov8/yolov8/weights/best.pt"
 ARTIFACT_EXTENSIONS = {".pt", ".ptl", ".onnx", ".json"}
 SUPPORTED_MODELS = {"resnet18", "yolov8"}
@@ -226,7 +227,7 @@ def _draw_prediction_overlay(
     return annotated
 
 def _artifacts_dir() -> Path:
-    return Path(os.getenv("ARTIFACTS_DIR", _checkpoint_path().parent)).expanduser().resolve()
+    return Path(os.getenv("ARTIFACTS_DIR", DEFAULT_ARTIFACTS_DIR)).expanduser().resolve()
 
 
 def _build_artifacts_zip(artifacts_dir: Path) -> io.BytesIO:
@@ -505,7 +506,7 @@ def _load_model(
         if requested_model_type == "yolov8":
             hint = "Train first, or set MODEL_CHECKPOINT_YOLO=/path/to/content/data/sugarcane_artifacts/yolov8/yolov8/weights/best.pt."
         else:
-            hint = "Train first, or set MODEL_CHECKPOINT_RESNET=/path/to/content/data/sugarcane_artifacts/best_model.pt."
+            hint = "Train first, or set MODEL_CHECKPOINT_RESNET=/path/to/content/data/sugarcane_artifacts/resnet18/best_model.pt."
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}. {hint}")
 
     if requested_model_type == "yolov8":
