@@ -4,6 +4,7 @@ from concurrent.futures import ProcessPoolExecutor
 import hashlib
 import json
 import random
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,6 +132,59 @@ def _split_class_items(
     val = items[n_train : n_train + n_val]
     test = items[n_train + n_val :]
     return {"train": train, "val": val, "test": test}
+
+
+def _group_key_from_path(path: Path) -> str:
+    stem = path.stem.strip().lower()
+    stem = re.sub(r"\s*\(\d+\)$", "", stem)
+    stem = re.sub(r"[_\-\s]+copy$", "", stem)
+    stem = re.sub(r"[_\-\s]+edited$", "", stem)
+    stem = re.sub(r"[_\-\s]+duplicate$", "", stem)
+    stem = re.sub(r"[^a-z0-9]+", "_", stem).strip("_")
+    return stem or path.stem.lower()
+
+
+def _split_class_items_grouped(
+    items: List[Path],
+    val_ratio: float,
+    test_ratio: float,
+    rng: random.Random,
+) -> Dict[str, List[Path]]:
+    grouped_items: Dict[str, List[Path]] = {}
+    for item in items:
+        grouped_items.setdefault(_group_key_from_path(item), []).append(item)
+
+    groups = list(grouped_items.values())
+    rng.shuffle(groups)
+    groups.sort(key=len, reverse=True)
+
+    n_total = len(items)
+    target_val = int(n_total * val_ratio)
+    target_test = int(n_total * test_ratio)
+    target_train = n_total - target_val - target_test
+
+    split_to_items: Dict[str, List[Path]] = {"train": [], "val": [], "test": []}
+    split_counts = {"train": 0, "val": 0, "test": 0}
+    target_counts = {"train": target_train, "val": target_val, "test": target_test}
+
+    for group in groups:
+        group_size = len(group)
+        best_split = min(
+            ("train", "val", "test"),
+            key=lambda split_name: (
+                abs((split_counts[split_name] + group_size) - target_counts[split_name]),
+                split_counts[split_name],
+            ),
+        )
+        split_to_items[best_split].extend(group)
+        split_counts[best_split] += group_size
+
+    if not split_to_items["train"] and split_to_items["val"]:
+        split_to_items["train"].append(split_to_items["val"].pop())
+    elif not split_to_items["train"] and split_to_items["test"]:
+        split_to_items["train"].append(split_to_items["test"].pop())
+
+    return split_to_items
 
 
 def _resolve_preprocess_device(device: PreprocessDevice) -> torch.device:
@@ -329,7 +383,12 @@ def run_preprocess(
 
         rng.shuffle(valid_paths)
         class_counts[class_name] = len(valid_paths)
-        splits = _split_class_items(valid_paths, val_ratio=val_ratio, test_ratio=test_ratio)
+        splits = _split_class_items_grouped(
+            valid_paths,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            rng=rng,
+        )
 
         save_tasks: List[tuple[Path, Path]] = []
         for split_name, split_paths in splits.items():
