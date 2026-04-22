@@ -15,7 +15,9 @@ import torch.nn.functional as F
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+KNOWN_MATURITY_LABELS = {"MATURE", "NOT_MATURE", "OVER_MATURE"}
 PreprocessDevice = Literal["auto", "cuda", "cpu"]
+LabelMode = Literal["variety", "maturity", "variety_maturity"]
 
 
 @dataclass
@@ -96,6 +98,34 @@ def _collect_images(raw_dir: Path) -> Dict[str, List[Path]]:
     return class_to_images
 
 
+def _collect_images_variety(raw_dir: Path) -> Dict[str, List[Path]]:
+    class_to_images: Dict[str, List[Path]] = {}
+    for variety_dir in sorted(p for p in raw_dir.iterdir() if p.is_dir()):
+        nested_maturity_dirs = [p for p in variety_dir.iterdir() if p.is_dir()]
+        if nested_maturity_dirs:
+            images = sorted(
+                [
+                    p
+                    for maturity_dir in nested_maturity_dirs
+                    for p in maturity_dir.rglob("*")
+                    if p.is_file() and _is_image_file(p)
+                ]
+            )
+        else:
+            images = sorted(
+                [p for p in variety_dir.rglob("*") if p.is_file() and _is_image_file(p)]
+            )
+        if images:
+            class_to_images[variety_dir.name] = images
+    if not class_to_images:
+        raise ValueError(
+            f"No images found in '{raw_dir}'. "
+            "Expected structure: raw_dir/<variety_name>/*.jpg or "
+            "raw_dir/<variety_name>/<maturity_status>/*.jpg"
+        )
+    return class_to_images
+
+
 def _collect_images_variety_maturity(raw_dir: Path) -> Dict[str, List[Path]]:
     class_to_images: Dict[str, List[Path]] = {}
     for variety_dir in sorted(p for p in raw_dir.iterdir() if p.is_dir()):
@@ -114,12 +144,34 @@ def _collect_images_variety_maturity(raw_dir: Path) -> Dict[str, List[Path]]:
     return class_to_images
 
 
+def _collect_images_maturity(raw_dir: Path) -> Dict[str, List[Path]]:
+    class_to_images: Dict[str, List[Path]] = {}
+    for variety_dir in sorted(p for p in raw_dir.iterdir() if p.is_dir()):
+        for maturity_dir in sorted(p for p in variety_dir.iterdir() if p.is_dir()):
+            images = sorted(
+                [p for p in maturity_dir.rglob("*") if p.is_file() and _is_image_file(p)]
+            )
+            if images:
+                class_to_images.setdefault(maturity_dir.name, []).extend(images)
+    class_to_images = {
+        class_name: sorted(paths) for class_name, paths in sorted(class_to_images.items())
+    }
+    if not class_to_images:
+        raise ValueError(
+            f"No images found in '{raw_dir}'. "
+            "Expected structure: raw_dir/<variety_name>/<maturity_status>/*.jpg"
+        )
+    return class_to_images
+
+
 def _collect_images_by_mode(
     raw_dir: Path,
-    label_mode: Literal["variety", "variety_maturity"],
+    label_mode: LabelMode,
 ) -> Dict[str, List[Path]]:
     if label_mode == "variety":
-        return _collect_images(raw_dir)
+        return _collect_images_variety(raw_dir)
+    if label_mode == "maturity":
+        return _collect_images_maturity(raw_dir)
     if label_mode == "variety_maturity":
         return _collect_images_variety_maturity(raw_dir)
     raise ValueError(f"Unsupported label_mode: {label_mode}")
@@ -422,7 +474,7 @@ def run_preprocess(
     test_ratio: float = 0.15,
     seed: int = 42,
     image_size: int | None = None,
-    label_mode: Literal["variety", "variety_maturity"] = "variety",
+    label_mode: LabelMode = "variety",
     preprocess_device: PreprocessDevice = "auto",
     preprocess_workers: int = 1,
 ) -> PreprocessSummary:
@@ -493,7 +545,7 @@ def run_preprocess_flat(
     raw_dir: str,
     output_dir: str,
     image_size: int | None = None,
-    label_mode: Literal["variety", "variety_maturity"] = "variety",
+    label_mode: LabelMode = "variety",
     preprocess_device: PreprocessDevice = "auto",
     preprocess_workers: int = 1,
 ) -> FlatPreprocessSummary:
@@ -509,12 +561,7 @@ def run_preprocess_flat(
     if preprocess_workers < 1:
         raise ValueError("preprocess_workers must be at least 1.")
 
-    if label_mode == "variety":
-        class_to_images = _collect_images(raw_path)
-    elif label_mode == "variety_maturity":
-        class_to_images = _collect_images_variety_maturity(raw_path)
-    else:
-        raise ValueError(f"Unsupported label_mode: {label_mode}")
+    class_to_images = _collect_images_by_mode(raw_path, label_mode=label_mode)
 
     if out_path.exists():
         shutil.rmtree(out_path)

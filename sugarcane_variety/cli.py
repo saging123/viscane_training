@@ -35,9 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prep.add_argument(
         "--label-mode",
-        choices=["variety", "variety_maturity"],
+        choices=["variety", "maturity", "variety_maturity"],
         default="variety",
-        help="Labeling mode: variety only or variety+maturity.",
+        help="Labeling mode: variety only, maturity only, or variety+maturity.",
     )
     prep.add_argument(
         "--preprocess-device",
@@ -70,9 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prep_flat.add_argument(
         "--label-mode",
-        choices=["variety", "variety_maturity"],
+        choices=["variety", "maturity", "variety_maturity"],
         default="variety",
-        help="Labeling mode: variety only or variety+maturity.",
+        help="Labeling mode: variety only, maturity only, or variety+maturity.",
     )
     prep_flat.add_argument(
         "--preprocess-device",
@@ -301,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     all_cmd.add_argument(
         "--label-mode",
-        choices=["variety", "variety_maturity"],
+        choices=["variety", "maturity", "variety_maturity"],
         default="variety",
         help="Labeling mode for preprocessing.",
     )

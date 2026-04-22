@@ -148,6 +148,11 @@ This writes `data/prepared/prepared_dataset_analysis.json` with:
 - low-sample warnings for weak classes,
 - variety and maturity rollups when using `variety_maturity`.
 
+Available label modes:
+- `variety`: groups all maturity folders under each variety into one class
+- `maturity`: groups the same maturity stage across all varieties into one class
+- `variety_maturity`: keeps combined labels like `524__MATURE`
+
 ### Test only (evaluate saved model on test split)
 
 ```bash
@@ -474,5 +479,12 @@ raw/
     not_mature/
 ```
 
-set `--label-mode variety_maturity` (or `label_mode="variety_maturity"` in Colab).
-The model trains on combined labels (example: `variety_1__mature`) and metrics include decoded fields for both `variety` and `maturity_status`.
+set:
+- `--label-mode variety` for variety-only experiments,
+- `--label-mode maturity` for maturity-only experiments,
+- `--label-mode variety_maturity` for combined-label experiments.
+
+The model trains on:
+- `variety` labels like `524` or `847` for variety-only experiments,
+- `maturity` labels like `MATURE` or `NOT_MATURE` for maturity-only experiments,
+- combined labels like `524__MATURE` for joint experiments.

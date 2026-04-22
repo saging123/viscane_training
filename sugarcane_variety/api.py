@@ -1568,10 +1568,10 @@ def start_training(
             status_code=400,
             detail="Use ratios where val_ratio + test_ratio is less than 1.",
         )
-    if request.label_mode not in {"variety", "variety_maturity"}:
+    if request.label_mode not in {"variety", "maturity", "variety_maturity"}:
         raise HTTPException(
             status_code=400,
-            detail="label_mode must be 'variety' or 'variety_maturity'.",
+            detail="label_mode must be 'variety', 'maturity', or 'variety_maturity'.",
         )
     if request.preprocess_device not in {"auto", "cuda", "cpu"}:
         raise HTTPException(

@@ -20,6 +20,7 @@ from torchvision.models import ResNet18_Weights
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
+KNOWN_MATURITY_LABELS = {"MATURE", "NOT_MATURE", "OVER_MATURE"}
 DEFAULT_ONNX_OPSETS = (16, 17)
 DEFAULT_TRAIN_EPOCHS = 35
 DEFAULT_TRAIN_LR = 5e-4
@@ -88,11 +89,26 @@ def _decode_class_name(class_name: str) -> Dict[str, str]:
             "variety": variety,
             "maturity_status": maturity,
         }
+    if class_name.upper() in KNOWN_MATURITY_LABELS:
+        return {
+            "class_name": class_name,
+            "variety": "",
+            "maturity_status": class_name,
+        }
     return {
         "class_name": class_name,
         "variety": class_name,
         "maturity_status": "",
     }
+
+
+def _infer_label_task(classes: list[str]) -> str:
+    decoded = [_decode_class_name(name) for name in classes]
+    if any(item["maturity_status"] and item["variety"] for item in decoded):
+        return "variety_maturity"
+    if all(item["maturity_status"] and not item["variety"] for item in decoded):
+        return "maturity"
+    return "variety"
 
 
 def _friendly_outcome_text(test_acc: float) -> str:
@@ -1197,6 +1213,7 @@ def run_evaluation(
     test_acc = float(np.mean(np.array(all_preds) == np.array(all_targets)))
     print(f"Test only | loss={test_loss:.4f} acc={test_acc:.4f}")
 
+    label_task = _infer_label_task(classes)
     decoded = [_decode_class_name(name) for name in classes]
     class_support = [0] * len(classes)
     class_correct = [0] * len(classes)
@@ -1204,7 +1221,7 @@ def run_evaluation(
 
     variety_correct = 0
     maturity_correct = 0
-    has_maturity = any(item["maturity_status"] for item in decoded)
+    has_maturity = label_task in {"variety_maturity", "maturity"}
 
     for target_idx, pred_idx in zip(all_targets, all_preds):
         class_support[target_idx] += 1
@@ -1214,13 +1231,13 @@ def run_evaluation(
 
         target_info = decoded[target_idx]
         pred_info = decoded[pred_idx]
-        if target_info["variety"] == pred_info["variety"]:
+        if label_task in {"variety", "variety_maturity"} and target_info["variety"] == pred_info["variety"]:
             variety_correct += 1
         if has_maturity and target_info["maturity_status"] == pred_info["maturity_status"]:
             maturity_correct += 1
 
-    variety_acc = variety_correct / num_samples
-    maturity_acc = (maturity_correct / num_samples) if has_maturity else None
+    variety_acc = test_acc if label_task == "variety" else (variety_correct / num_samples)
+    maturity_acc = test_acc if label_task == "maturity" else ((maturity_correct / num_samples) if has_maturity else None)
 
     per_class: List[Dict[str, object]] = []
     for idx, class_name in enumerate(classes):
@@ -1256,15 +1273,22 @@ def run_evaluation(
     confusion_pairs.sort(key=lambda x: int(x["count"]), reverse=True)
     top_confusions = confusion_pairs[:10]
 
-    interpretation_points = [
-        f"Exact label accuracy (variety + maturity): {test_acc:.2%}",
-        f"Variety-only accuracy: {variety_acc:.2%}",
-    ]
-    if maturity_acc is not None:
-        interpretation_points.append(f"Maturity-only accuracy: {maturity_acc:.2%}")
-    interpretation_points.append(
-        "Check top_confusions to see which classes the model mixes up most often."
-    )
+    if label_task == "variety_maturity":
+        interpretation_points = [
+            f"Exact label accuracy (variety + maturity): {test_acc:.2%}",
+            f"Variety-only accuracy: {variety_acc:.2%}",
+        ]
+        if maturity_acc is not None:
+            interpretation_points.append(f"Maturity-only accuracy: {maturity_acc:.2%}")
+    elif label_task == "maturity":
+        interpretation_points = [
+            f"Maturity-only accuracy: {test_acc:.2%}",
+        ]
+    else:
+        interpretation_points = [
+            f"Variety-only accuracy: {test_acc:.2%}",
+        ]
+    interpretation_points.append("Check top_confusions to see which classes the model mixes up most often.")
 
     friendly_outcome = _friendly_outcome_text(test_acc)
     summary_json_path = ckpt_path.parent / "test_summary.json"
@@ -1275,6 +1299,7 @@ def run_evaluation(
         "classes": classes,
         "checkpoint_path": str(ckpt_path),
         "device": str(device),
+        "label_task": label_task,
         "variety_acc": variety_acc,
         "maturity_acc": maturity_acc,
         "per_class": per_class,
@@ -1341,15 +1366,19 @@ def _run_yolov8_evaluation(
         classes = test_ds.classes
     num_samples = len(datasets.ImageFolder(test_path, transform=transforms.PILToTensor()))
 
-    variety_acc = test_acc
-    maturity_acc = None
-    if any(_decode_class_name(name)["maturity_status"] for name in classes):
-        maturity_acc = test_acc
+    label_task = _infer_label_task(classes)
+    variety_acc = test_acc if label_task in {"variety", "variety_maturity"} else 0.0
+    maturity_acc = test_acc if label_task in {"maturity", "variety_maturity"} else None
 
-    interpretation_points = [
-        f"YOLOv8 top-1 accuracy: {test_acc:.2%}",
-        "For detailed YOLOv8 confusion plots, inspect the validation output folder.",
-    ]
+    interpretation_points = [f"YOLOv8 top-1 accuracy: {test_acc:.2%}"]
+    if label_task == "variety":
+        interpretation_points.append(f"Variety-only accuracy: {test_acc:.2%}")
+    elif label_task == "maturity":
+        interpretation_points.append(f"Maturity-only accuracy: {test_acc:.2%}")
+    else:
+        interpretation_points.append(f"Variety-only accuracy: {test_acc:.2%}")
+        interpretation_points.append(f"Maturity-only accuracy: {test_acc:.2%}")
+    interpretation_points.append("For detailed YOLOv8 confusion plots, inspect the validation output folder.")
     friendly_outcome = _friendly_outcome_text(test_acc)
     summary_json_path = ckpt_path.parent.parent / "test_summary.json"
     summary_payload: Dict[str, object] = {
@@ -1360,6 +1389,7 @@ def _run_yolov8_evaluation(
         "classes": classes,
         "checkpoint_path": str(ckpt_path),
         "device": "ultralytics",
+        "label_task": label_task,
         "variety_acc": variety_acc,
         "maturity_acc": maturity_acc,
         "per_class": [],
