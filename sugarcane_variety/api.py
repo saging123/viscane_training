@@ -27,7 +27,7 @@ from sugarcane_variety.train import (
 from sugarcane_variety.colab_compatible import run_all_for_colab, test_for_colab
 
 
-DEFAULT_CHECKPOINT_PATH = "artifacts/best_model.pt"
+DEFAULT_CHECKPOINT_PATH = "content/data/sugarcane_artifacts/best_model.pt"
 ARTIFACT_EXTENSIONS = {".pt", ".ptl", ".onnx", ".json"}
 SUPPORTED_MODELS = {"resnet18", "yolov8"}
 
@@ -464,7 +464,7 @@ def _load_model(
     if not checkpoint_path.exists():
         raise FileNotFoundError(
             f"Checkpoint not found: {checkpoint_path}. "
-            "Train first, or set MODEL_CHECKPOINT=/path/to/best_model.pt."
+            "Train first, or set MODEL_CHECKPOINT=/path/to/content/data/sugarcane_artifacts/best_model.pt."
         )
 
     requested_model_type = model_type or _infer_model_type(checkpoint_path)
