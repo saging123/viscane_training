@@ -27,20 +27,22 @@ from sugarcane_variety.train import (
 from sugarcane_variety.colab_compatible import run_all_for_colab, test_for_colab
 
 
-DEFAULT_CHECKPOINT_PATH = "content/data/sugarcane_artifacts/best_model.pt"
+DEFAULT_RESNET_CHECKPOINT_PATH = "content/data/sugarcane_artifacts/best_model.pt"
+DEFAULT_YOLO_CHECKPOINT_PATH = "content/data/sugarcane_artifacts/yolov8/yolov8/weights/best.pt"
 ARTIFACT_EXTENSIONS = {".pt", ".ptl", ".onnx", ".json"}
 SUPPORTED_MODELS = {"resnet18", "yolov8"}
 
 
 app = FastAPI(title="Sugarcane Variety Classifier API")
 
-model: Any | None = None
-loaded_model_type = "resnet18"
-classes: list[str] = []
-image_size = 224
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 to_tensor = transforms.PILToTensor()
-model_load_error: str | None = None
+loaded_model_type = "resnet18"
+loaded_models: dict[str, Any | None] = {model_type: None for model_type in SUPPORTED_MODELS}
+model_classes: dict[str, list[str]] = {model_type: [] for model_type in SUPPORTED_MODELS}
+model_image_sizes: dict[str, int] = {model_type: 224 for model_type in SUPPORTED_MODELS}
+model_load_errors: dict[str, str | None] = {model_type: None for model_type in SUPPORTED_MODELS}
+model_checkpoints: dict[str, Path] = {}
 training_lock = threading.Lock()
 training_status: dict[str, Any] = {
     "state": "idle",
@@ -91,13 +93,34 @@ def _open_uploaded_image(contents: bytes) -> tuple[Image.Image, torch.Tensor]:
     return pil_image, to_tensor(pil_image)
 
 
-def _predict_probabilities(image: torch.Tensor) -> torch.Tensor:
-    if model is None:
-        raise HTTPException(status_code=503, detail="Model is not loaded yet.")
+def _model_checkpoint_path(model_type: str) -> Path:
+    if model_type == "yolov8":
+        env_name = "MODEL_CHECKPOINT_YOLO"
+        default_path = DEFAULT_YOLO_CHECKPOINT_PATH
+    else:
+        env_name = "MODEL_CHECKPOINT_RESNET"
+        default_path = DEFAULT_RESNET_CHECKPOINT_PATH
+    return Path(os.getenv(env_name, default_path)).expanduser().resolve()
 
-    if loaded_model_type == "yolov8":
+
+def _checkpoint_path() -> Path:
+    return _model_checkpoint_path("resnet18")
+
+
+def _active_checkpoint_path() -> Path:
+    if loaded_models.get(loaded_model_type) is not None:
+        return model_checkpoints.get(loaded_model_type, _model_checkpoint_path(loaded_model_type))
+    return _checkpoint_path()
+
+
+def _predict_probabilities(image: torch.Tensor, model_type: str) -> torch.Tensor:
+    selected_model = loaded_models.get(model_type)
+    if selected_model is None:
+        raise HTTPException(status_code=503, detail=f"{model_type} model is not loaded yet.")
+
+    if model_type == "yolov8":
         try:
-            result = model(_tensor_to_pil(image), verbose=False)[0]
+            result = selected_model(_tensor_to_pil(image), verbose=False)[0]
             probs = result.probs.data
             return probs.detach().to(device="cpu")
         except Exception as exc:
@@ -110,10 +133,10 @@ def _predict_probabilities(image: torch.Tensor) -> torch.Tensor:
         batch = _prepare_images_on_device(
             [image],
             device=device,
-            image_size=image_size,
+            image_size=model_image_sizes[model_type],
             training=False,
         )
-        logits = model(batch)
+        logits = selected_model(batch)
         return F.softmax(logits, dim=1)[0]
 
 
@@ -122,17 +145,21 @@ def _tensor_to_pil(image: torch.Tensor) -> Image.Image:
     return Image.fromarray(array)
 
 
-def _build_predictions(probabilities: torch.Tensor, top_k: int) -> list[dict[str, Any]]:
+def _build_predictions(
+    probabilities: torch.Tensor,
+    top_k: int,
+    class_names: list[str],
+) -> list[dict[str, Any]]:
     if top_k < 1:
         raise HTTPException(status_code=400, detail="top_k must be at least 1.")
-    if not classes:
+    if not class_names:
         raise HTTPException(status_code=503, detail="Model class labels are not loaded.")
-    top_k = min(top_k, len(classes))
+    top_k = min(top_k, len(class_names))
 
     scores, indexes = torch.topk(probabilities, k=top_k)
     predictions = []
     for score, index in zip(scores.detach().cpu().tolist(), indexes.detach().cpu().tolist()):
-        class_name = classes[index]
+        class_name = class_names[index]
         predictions.append(
             {
                 "class_index": index,
@@ -143,9 +170,9 @@ def _build_predictions(probabilities: torch.Tensor, top_k: int) -> list[dict[str
     return predictions
 
 
-def _maturity_reason(probabilities: torch.Tensor) -> dict[str, Any]:
+def _maturity_reason(probabilities: torch.Tensor, class_names: list[str]) -> dict[str, Any]:
     maturity_scores: dict[str, float] = {}
-    for index, class_name in enumerate(classes):
+    for index, class_name in enumerate(class_names):
         decoded = _decode_class_name(class_name)
         maturity_status = decoded["maturity_status"] or "unknown"
         maturity_scores[maturity_status] = (
@@ -177,7 +204,8 @@ def _draw_prediction_overlay(
     annotated = image.copy()
     draw = ImageDraw.Draw(annotated, "RGBA")
 
-    crop_scale = image_size / int(image_size * 1.15)
+    crop_image_size = model_image_sizes.get("resnet18") or model_image_sizes.get("yolov8") or 224
+    crop_scale = crop_image_size / int(crop_image_size * 1.15)
     crop_size = min(annotated.width, annotated.height) * crop_scale
     left = (annotated.width - crop_size) / 2
     top = (annotated.height - crop_size) / 2
@@ -196,11 +224,6 @@ def _draw_prediction_overlay(
     draw.rectangle((left, top, right, bottom), outline=color, width=line_width)
 
     return annotated
-
-
-def _checkpoint_path() -> Path:
-    return Path(os.getenv("MODEL_CHECKPOINT", DEFAULT_CHECKPOINT_PATH)).expanduser().resolve()
-
 
 def _artifacts_dir() -> Path:
     return Path(os.getenv("ARTIFACTS_DIR", _checkpoint_path().parent)).expanduser().resolve()
@@ -341,17 +364,29 @@ def _build_current_report(artifacts_dir: Path | None = None) -> dict[str, Any]:
         "generated_at_unix": time.time(),
         "loaded_model": {
             "model_type": loaded_model_type,
-            "checkpoint": str(_checkpoint_path()),
-            "model_loaded": model is not None,
-            "model_load_error": model_load_error,
-            "classes": [
-                {
-                    "index": index,
-                    **_decode_class_name(class_name),
+            "checkpoint": str(_active_checkpoint_path()),
+            "model_loaded": loaded_models.get(loaded_model_type) is not None,
+            "model_load_error": model_load_errors.get(loaded_model_type),
+            "checkpoints": {
+                model_type: str(model_checkpoints.get(model_type, _model_checkpoint_path(model_type)))
+                for model_type in sorted(SUPPORTED_MODELS)
+            },
+            "models": {
+                model_type: {
+                    "model_loaded": loaded_models.get(model_type) is not None,
+                    "model_load_error": model_load_errors.get(model_type),
+                    "checkpoint": str(model_checkpoints.get(model_type, _model_checkpoint_path(model_type))),
+                    "classes": [
+                        {
+                            "index": index,
+                            **_decode_class_name(class_name),
+                        }
+                        for index, class_name in enumerate(model_classes[model_type])
+                    ],
+                    "image_size": model_image_sizes[model_type],
                 }
-                for index, class_name in enumerate(classes)
-            ],
-            "image_size": image_size,
+                for model_type in sorted(SUPPORTED_MODELS)
+            },
             "device": str(device),
         },
         "training": {
@@ -413,7 +448,10 @@ def _run_training_job(request: TrainingRequest) -> None:
             model_type=train_summary.model_type,
         )
 
-        os.environ["MODEL_CHECKPOINT"] = train_summary.checkpoint_path
+        if train_summary.model_type == "yolov8":
+            os.environ["MODEL_CHECKPOINT_YOLO"] = train_summary.checkpoint_path
+        else:
+            os.environ["MODEL_CHECKPOINT_RESNET"] = train_summary.checkpoint_path
         _load_model(
             checkpoint_path=Path(train_summary.checkpoint_path),
             model_type=train_summary.model_type,
@@ -458,16 +496,18 @@ def _load_model(
     checkpoint_path: Path | None = None,
     model_type: str | None = None,
 ) -> None:
-    global model, loaded_model_type, classes, image_size, model_load_error
-
+    requested_model_type = model_type
+    if checkpoint_path is None and requested_model_type is not None:
+        checkpoint_path = _model_checkpoint_path(requested_model_type)
     checkpoint_path = checkpoint_path or _checkpoint_path()
+    requested_model_type = requested_model_type or _infer_model_type(checkpoint_path)
     if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Checkpoint not found: {checkpoint_path}. "
-            "Train first, or set MODEL_CHECKPOINT=/path/to/content/data/sugarcane_artifacts/best_model.pt."
-        )
+        if requested_model_type == "yolov8":
+            hint = "Train first, or set MODEL_CHECKPOINT_YOLO=/path/to/content/data/sugarcane_artifacts/yolov8/yolov8/weights/best.pt."
+        else:
+            hint = "Train first, or set MODEL_CHECKPOINT_RESNET=/path/to/content/data/sugarcane_artifacts/best_model.pt."
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}. {hint}")
 
-    requested_model_type = model_type or _infer_model_type(checkpoint_path)
     if requested_model_type == "yolov8":
         try:
             from ultralytics import YOLO
@@ -480,10 +520,12 @@ def _load_model(
             name
             for _, name in sorted(yolo_names.items(), key=lambda item: int(item[0]))
         ]
-        image_size = int(os.getenv("MODEL_IMAGE_SIZE", "224"))
-        model = loaded_model
+        model_classes["yolov8"] = classes
+        model_image_sizes["yolov8"] = int(os.getenv("MODEL_IMAGE_SIZE_YOLO", os.getenv("MODEL_IMAGE_SIZE", "224")))
+        loaded_models["yolov8"] = loaded_model
         loaded_model_type = "yolov8"
-        model_load_error = None
+        model_load_errors["yolov8"] = None
+        model_checkpoints["yolov8"] = checkpoint_path
         return
 
     if requested_model_type != "resnet18":
@@ -498,9 +540,12 @@ def _load_model(
     loaded_model.to(device)
     loaded_model.eval()
 
-    model = loaded_model
+    loaded_models["resnet18"] = loaded_model
     loaded_model_type = "resnet18"
-    model_load_error = None
+    model_classes["resnet18"] = classes
+    model_image_sizes["resnet18"] = image_size
+    model_load_errors["resnet18"] = None
+    model_checkpoints["resnet18"] = checkpoint_path
 
 
 def _infer_model_type(checkpoint_path: Path) -> str:
@@ -515,25 +560,40 @@ def _infer_model_type(checkpoint_path: Path) -> str:
 
 @app.on_event("startup")
 def startup() -> None:
-    global model_load_error
+    global loaded_model_type
 
-    try:
-        _load_model()
-    except Exception as exc:
-        model_load_error = f"{type(exc).__name__}: {exc}"
+    for model_type in sorted(SUPPORTED_MODELS):
+        try:
+            _load_model(model_type=model_type)
+        except Exception as exc:
+            loaded_models[model_type] = None
+            model_classes[model_type] = []
+            model_load_errors[model_type] = f"{type(exc).__name__}: {exc}"
+    if loaded_models.get("resnet18") is not None:
+        loaded_model_type = "resnet18"
+    elif loaded_models.get("yolov8") is not None:
+        loaded_model_type = "yolov8"
 
 
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {
         "status": "ok",
-        "model_loaded": model is not None,
-        "model_load_error": model_load_error,
+        "model_loaded": any(loaded_models.values()),
+        "model_load_error": model_load_errors.get(loaded_model_type),
         "device": str(device),
-        "checkpoint": str(_checkpoint_path()),
+        "checkpoint": str(_active_checkpoint_path()),
         "model_type": loaded_model_type,
-        "classes": len(classes),
-        "image_size": image_size,
+        "models": {
+            model_type: {
+                "loaded": loaded_models.get(model_type) is not None,
+                "checkpoint": str(model_checkpoints.get(model_type, _model_checkpoint_path(model_type))),
+                "classes": len(model_classes[model_type]),
+                "image_size": model_image_sizes[model_type],
+                "error": model_load_errors.get(model_type),
+            }
+            for model_type in sorted(SUPPORTED_MODELS)
+        },
     }
 
 
@@ -555,6 +615,9 @@ def list_supported_models() -> dict[str, Any]:
             },
         ],
         "loaded_model_type": loaded_model_type,
+        "loaded_models": [
+            model_type for model_type in sorted(SUPPORTED_MODELS) if loaded_models.get(model_type) is not None
+        ],
     }
 
 
@@ -577,26 +640,33 @@ def load_model_endpoint(request: ModelLoadRequest) -> dict[str, Any]:
         )
     checkpoint_path = Path(request.checkpoint_path).expanduser().resolve()
     _load_model(checkpoint_path=checkpoint_path, model_type=request.model_type)
-    os.environ["MODEL_CHECKPOINT"] = str(checkpoint_path)
+    resolved_model_type = request.model_type or _infer_model_type(checkpoint_path)
+    if resolved_model_type == "yolov8":
+        os.environ["MODEL_CHECKPOINT_YOLO"] = str(checkpoint_path)
+    else:
+        os.environ["MODEL_CHECKPOINT_RESNET"] = str(checkpoint_path)
     return {
         "message": "Model loaded.",
         "checkpoint_path": str(checkpoint_path),
-        "model_type": loaded_model_type,
-        "classes": len(classes),
-        "image_size": image_size,
+        "model_type": resolved_model_type,
+        "classes": len(model_classes[resolved_model_type]),
+        "image_size": model_image_sizes[resolved_model_type],
     }
 
 
 @app.get("/classes")
 def list_classes() -> dict[str, Any]:
     return {
-        "classes": [
-            {
-                "index": index,
-                **_decode_class_name(class_name),
-            }
-            for index, class_name in enumerate(classes)
-        ]
+        "models": {
+            model_type: [
+                {
+                    "index": index,
+                    **_decode_class_name(class_name),
+                }
+                for index, class_name in enumerate(model_classes[model_type])
+            ]
+            for model_type in sorted(SUPPORTED_MODELS)
+        }
     }
 
 
@@ -664,13 +734,27 @@ def get_training_status() -> dict[str, Any]:
 async def predict(file: UploadFile = File(...), top_k: int = 3) -> dict[str, Any]:
     contents = await file.read()
     _, image = _open_uploaded_image(contents)
-    probabilities = _predict_probabilities(image)
-    predictions = _build_predictions(probabilities, top_k=top_k)
+    results: dict[str, Any] = {}
+    for model_type in sorted(SUPPORTED_MODELS):
+        if loaded_models.get(model_type) is None:
+            continue
+        probabilities = _predict_probabilities(image, model_type=model_type)
+        predictions = _build_predictions(
+            probabilities,
+            top_k=top_k,
+            class_names=model_classes[model_type],
+        )
+        results[model_type] = {
+            "prediction": predictions[0],
+            "top_k": predictions,
+        }
+
+    if not results:
+        raise HTTPException(status_code=503, detail="No models are loaded yet.")
 
     return {
         "filename": file.filename,
-        "prediction": predictions[0],
-        "top_k": predictions,
+        "models": results,
     }
 
 
@@ -678,9 +762,16 @@ async def predict(file: UploadFile = File(...), top_k: int = 3) -> dict[str, Any
 async def predict_annotated(file: UploadFile = File(...), top_k: int = 3) -> StreamingResponse:
     contents = await file.read()
     pil_image, image = _open_uploaded_image(contents)
-    probabilities = _predict_probabilities(image)
-    predictions = _build_predictions(probabilities, top_k=top_k)
-    reason = _maturity_reason(probabilities)
+    reason_model_type = "resnet18" if loaded_models.get("resnet18") is not None else "yolov8"
+    if loaded_models.get(reason_model_type) is None:
+        raise HTTPException(status_code=503, detail="No models are loaded yet.")
+    probabilities = _predict_probabilities(image, model_type=reason_model_type)
+    predictions = _build_predictions(
+        probabilities,
+        top_k=top_k,
+        class_names=model_classes[reason_model_type],
+    )
+    reason = _maturity_reason(probabilities, class_names=model_classes[reason_model_type])
 
     annotated = _draw_prediction_overlay(
         image=pil_image,
@@ -691,6 +782,7 @@ async def predict_annotated(file: UploadFile = File(...), top_k: int = 3) -> Str
     output.seek(0)
 
     headers = {
+        "X-Model-Type": reason_model_type,
         "X-Predicted-Class": str(predictions[0]["class_name"]),
         "X-Predicted-Variety": str(predictions[0]["variety"]),
         "X-Predicted-Maturity": str(reason["maturity_status"]),
