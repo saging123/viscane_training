@@ -48,6 +48,21 @@ class SplitLeakageSummary:
     summary_json_path: str
 
 
+@dataclass
+class PreparedDatasetAnalysisSummary:
+    prepared_dir: str
+    total_images: int
+    split_counts: Dict[str, int]
+    class_counts_by_split: Dict[str, Dict[str, int]]
+    overall_class_counts: Dict[str, int]
+    class_distribution_ratio: float
+    low_sample_threshold: int
+    low_sample_warnings: List[Dict[str, object]]
+    variety_counts_by_split: Dict[str, Dict[str, int]]
+    maturity_counts_by_split: Dict[str, Dict[str, int]]
+    summary_json_path: str
+
+
 def _is_image_file(path: Path) -> bool:
     return path.suffix.lower() in VALID_EXTENSIONS
 
@@ -672,5 +687,127 @@ def audit_prepared_splits(
         cross_split_exact_groups=cross_split_exact_groups,
         cross_split_near_groups=cross_split_near_groups,
         suspicious_examples=suspicious_examples,
+        summary_json_path=str(summary_json_path),
+    )
+
+
+def analyze_prepared_dataset(
+    prepared_dir: str,
+    low_sample_threshold: int = 20,
+) -> PreparedDatasetAnalysisSummary:
+    prepared_path = Path(prepared_dir).expanduser().resolve()
+    if not prepared_path.exists():
+        raise FileNotFoundError(f"Prepared dataset path does not exist: {prepared_path}")
+    if low_sample_threshold < 1:
+        raise ValueError("low_sample_threshold must be at least 1.")
+
+    split_names = ("train", "val", "test")
+    split_counts: Dict[str, int] = {}
+    class_counts_by_split: Dict[str, Dict[str, int]] = {}
+    overall_class_counts: Dict[str, int] = {}
+    variety_counts_by_split: Dict[str, Dict[str, int]] = {}
+    maturity_counts_by_split: Dict[str, Dict[str, int]] = {}
+
+    total_images = 0
+    for split_name in split_names:
+        split_dir = prepared_path / split_name
+        split_class_counts: Dict[str, int] = {}
+        split_variety_counts: Dict[str, int] = {}
+        split_maturity_counts: Dict[str, int] = {}
+        split_total = 0
+
+        if split_dir.exists():
+            for class_dir in sorted(path for path in split_dir.iterdir() if path.is_dir()):
+                image_count = sum(
+                    1 for path in class_dir.rglob("*") if path.is_file() and _is_image_file(path)
+                )
+                if image_count <= 0:
+                    continue
+
+                class_name = class_dir.name
+                split_class_counts[class_name] = image_count
+                overall_class_counts[class_name] = (
+                    overall_class_counts.get(class_name, 0) + image_count
+                )
+                split_total += image_count
+
+                if "__" in class_name:
+                    variety_name, maturity_name = class_name.split("__", 1)
+                    split_variety_counts[variety_name] = (
+                        split_variety_counts.get(variety_name, 0) + image_count
+                    )
+                    split_maturity_counts[maturity_name] = (
+                        split_maturity_counts.get(maturity_name, 0) + image_count
+                    )
+
+        split_counts[split_name] = split_total
+        class_counts_by_split[split_name] = split_class_counts
+        variety_counts_by_split[split_name] = split_variety_counts
+        maturity_counts_by_split[split_name] = split_maturity_counts
+        total_images += split_total
+
+    if total_images <= 0:
+        raise ValueError(f"No prepared images found under: {prepared_path}")
+
+    class_count_values = list(overall_class_counts.values())
+    max_class_count = max(class_count_values) if class_count_values else 0
+    min_class_count = min(class_count_values) if class_count_values else 0
+    class_distribution_ratio = (
+        float(min_class_count) / float(max_class_count) if max_class_count > 0 else 0.0
+    )
+
+    low_sample_warnings: List[Dict[str, object]] = []
+    val_test_floor = max(1, low_sample_threshold // 3)
+    for class_name in sorted(overall_class_counts.keys()):
+        split_details = {
+            split_name: class_counts_by_split.get(split_name, {}).get(class_name, 0)
+            for split_name in split_names
+        }
+        total_for_class = overall_class_counts[class_name]
+        warning_reasons: List[str] = []
+        if split_details["train"] < low_sample_threshold:
+            warning_reasons.append("low_train_samples")
+        if split_details["val"] < val_test_floor:
+            warning_reasons.append("low_val_samples")
+        if split_details["test"] < val_test_floor:
+            warning_reasons.append("low_test_samples")
+        if total_for_class < (low_sample_threshold * 2):
+            warning_reasons.append("low_total_samples")
+        if warning_reasons:
+            low_sample_warnings.append(
+                {
+                    "class_name": class_name,
+                    "counts": split_details,
+                    "total": total_for_class,
+                    "reasons": warning_reasons,
+                }
+            )
+
+    summary = {
+        "prepared_dir": str(prepared_path),
+        "total_images": total_images,
+        "split_counts": split_counts,
+        "class_counts_by_split": class_counts_by_split,
+        "overall_class_counts": overall_class_counts,
+        "class_distribution_ratio": class_distribution_ratio,
+        "low_sample_threshold": low_sample_threshold,
+        "low_sample_warnings": low_sample_warnings,
+        "variety_counts_by_split": variety_counts_by_split,
+        "maturity_counts_by_split": maturity_counts_by_split,
+    }
+    summary_json_path = prepared_path / "prepared_dataset_analysis.json"
+    summary_json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    return PreparedDatasetAnalysisSummary(
+        prepared_dir=str(prepared_path),
+        total_images=total_images,
+        split_counts=split_counts,
+        class_counts_by_split=class_counts_by_split,
+        overall_class_counts=overall_class_counts,
+        class_distribution_ratio=class_distribution_ratio,
+        low_sample_threshold=low_sample_threshold,
+        low_sample_warnings=low_sample_warnings,
+        variety_counts_by_split=variety_counts_by_split,
+        maturity_counts_by_split=maturity_counts_by_split,
         summary_json_path=str(summary_json_path),
     )

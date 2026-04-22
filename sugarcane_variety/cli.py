@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from sugarcane_variety.preprocess import (
+    analyze_prepared_dataset,
     audit_prepared_splits,
     run_preprocess,
     run_preprocess_flat,
@@ -110,6 +111,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parallel workers for image hashing during the audit.",
     )
 
+    analyze = subparsers.add_parser(
+        "analyze-prepared",
+        help="Summarize class balance, split counts, and low-sample risks.",
+    )
+    analyze.add_argument("--prepared-dir", required=True, help="Prepared dataset root.")
+    analyze.add_argument(
+        "--low-sample-threshold",
+        type=int,
+        default=20,
+        help="Warn when a class has fewer than this many train samples.",
+    )
+
     train = subparsers.add_parser("train", help="Train model on prepared dataset.")
     train.add_argument("--prepared-dir", required=True, help="Prepared dataset root.")
     train.add_argument(
@@ -117,11 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="artifacts",
         help="Directory for model checkpoints and metrics.",
     )
-    train.add_argument("--epochs", type=int, default=20, help="Training epochs.")
+    train.add_argument("--epochs", type=int, default=35, help="Training epochs.")
     train.add_argument("--batch-size", type=int, default=32, help="Batch size.")
-    train.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
+    train.add_argument("--lr", type=float, default=5e-4, help="Learning rate.")
     train.add_argument(
-        "--weight-decay", type=float, default=1e-4, help="Weight decay for AdamW."
+        "--weight-decay", type=float, default=5e-4, help="Weight decay for AdamW."
     )
     train.add_argument("--image-size", type=int, default=224, help="Input size.")
     train.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
@@ -154,6 +167,23 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=18.0,
         help="Maximum random rotation in degrees for ResNet training images.",
+    )
+    train.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=8,
+        help="Stop training after this many epochs without meaningful validation improvement.",
+    )
+    train.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.002,
+        help="Minimum validation-accuracy gain counted as an improvement for ResNet18.",
+    )
+    train.add_argument(
+        "--disable-class-weights",
+        action="store_true",
+        help="Disable inverse-frequency class weighting for ResNet18 training loss.",
     )
     train.add_argument(
         "--model-type",
@@ -203,11 +233,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional square resize during preprocessing.",
     )
-    all_cmd.add_argument("--epochs", type=int, default=20, help="Training epochs.")
+    all_cmd.add_argument("--epochs", type=int, default=35, help="Training epochs.")
     all_cmd.add_argument("--batch-size", type=int, default=32, help="Batch size.")
-    all_cmd.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
+    all_cmd.add_argument("--lr", type=float, default=5e-4, help="Learning rate.")
     all_cmd.add_argument(
-        "--weight-decay", type=float, default=1e-4, help="Weight decay for AdamW."
+        "--weight-decay", type=float, default=5e-4, help="Weight decay for AdamW."
     )
     all_cmd.add_argument("--image-size", type=int, default=224, help="Input size.")
     all_cmd.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
@@ -240,6 +270,23 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=18.0,
         help="Maximum random rotation in degrees for ResNet training images.",
+    )
+    all_cmd.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=8,
+        help="Stop training after this many epochs without meaningful validation improvement.",
+    )
+    all_cmd.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.002,
+        help="Minimum validation-accuracy gain counted as an improvement for ResNet18.",
+    )
+    all_cmd.add_argument(
+        "--disable-class-weights",
+        action="store_true",
+        help="Disable inverse-frequency class weighting for ResNet18 training loss.",
     )
     all_cmd.add_argument(
         "--model-type",
@@ -343,6 +390,36 @@ def main() -> None:
                     )
         return
 
+    if args.command == "analyze-prepared":
+        summary = analyze_prepared_dataset(
+            prepared_dir=args.prepared_dir,
+            low_sample_threshold=args.low_sample_threshold,
+        )
+        print("Prepared dataset analysis complete")
+        print(f"Prepared dir: {summary.prepared_dir}")
+        print(f"Total images: {summary.total_images}")
+        print(
+            f"Split counts: train={summary.split_counts.get('train', 0)} "
+            f"val={summary.split_counts.get('val', 0)} "
+            f"test={summary.split_counts.get('test', 0)}"
+        )
+        print(f"Classes: {len(summary.overall_class_counts)}")
+        print(
+            "Class distribution ratio "
+            f"(minority/majority): {summary.class_distribution_ratio:.4f}"
+        )
+        print(f"Summary JSON: {summary.summary_json_path}")
+        if summary.low_sample_warnings:
+            print("Low-sample warnings:")
+            for warning in summary.low_sample_warnings[:10]:
+                counts = warning["counts"]
+                print(
+                    f"- {warning['class_name']}: train={counts['train']} "
+                    f"val={counts['val']} test={counts['test']} "
+                    f"total={warning['total']} reasons={','.join(warning['reasons'])}"
+                )
+        return
+
     if args.command == "train":
         summary = run_training(
             prepared_dir=args.prepared_dir,
@@ -359,6 +436,9 @@ def main() -> None:
             blur_prob=args.blur_prob,
             erase_prob=args.erase_prob,
             rotation_degrees=args.rotation_degrees,
+            early_stopping_patience=args.early_stopping_patience,
+            early_stopping_min_delta=args.early_stopping_min_delta,
+            use_class_weights=not args.disable_class_weights,
             model_type=args.model_type,
             yolo_weights=args.yolo_weights,
         )
@@ -443,6 +523,9 @@ def main() -> None:
             blur_prob=args.blur_prob,
             erase_prob=args.erase_prob,
             rotation_degrees=args.rotation_degrees,
+            early_stopping_patience=args.early_stopping_patience,
+            early_stopping_min_delta=args.early_stopping_min_delta,
+            use_class_weights=not args.disable_class_weights,
             model_type=args.model_type,
             yolo_weights=args.yolo_weights,
         )

@@ -21,6 +21,11 @@ from torchvision.models import ResNet18_Weights
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 DEFAULT_ONNX_OPSETS = (16, 17)
+DEFAULT_TRAIN_EPOCHS = 35
+DEFAULT_TRAIN_LR = 5e-4
+DEFAULT_TRAIN_WEIGHT_DECAY = 5e-4
+DEFAULT_EARLY_STOPPING_PATIENCE = 8
+DEFAULT_EARLY_STOPPING_MIN_DELTA = 0.002
 DEFAULT_TRAIN_NOISE_STD = 0.07
 DEFAULT_TRAIN_BLUR_PROB = 0.30
 DEFAULT_TRAIN_ERASE_PROB = 0.30
@@ -161,6 +166,21 @@ def _build_dataloaders(
         collate_fn=_collate_raw_images,
     )
     return train_dl, val_dl, test_dl, train_ds.classes
+
+
+def _compute_class_weights(
+    train_dataset: datasets.ImageFolder,
+    num_classes: int,
+    device: torch.device,
+) -> torch.Tensor:
+    targets = getattr(train_dataset, "targets", None)
+    if not targets:
+        return torch.ones(num_classes, device=device, dtype=torch.float32)
+
+    counts = torch.bincount(torch.tensor(targets, dtype=torch.long), minlength=num_classes)
+    counts = counts.clamp_min(1).to(device=device, dtype=torch.float32)
+    weights = counts.sum() / (counts * float(num_classes))
+    return weights / weights.mean()
 
 
 def _collate_raw_images(
@@ -483,10 +503,10 @@ def _eval_epoch(
 def _run_resnet18_training(
     prepared_dir: str,
     output_dir: str,
-    epochs: int = 20,
+    epochs: int = DEFAULT_TRAIN_EPOCHS,
     batch_size: int = 32,
-    lr: float = 1e-3,
-    weight_decay: float = 1e-4,
+    lr: float = DEFAULT_TRAIN_LR,
+    weight_decay: float = DEFAULT_TRAIN_WEIGHT_DECAY,
     image_size: int = 224,
     workers: int = 4,
     seed: int = 42,
@@ -495,6 +515,9 @@ def _run_resnet18_training(
     blur_prob: float = DEFAULT_TRAIN_BLUR_PROB,
     erase_prob: float = DEFAULT_TRAIN_ERASE_PROB,
     rotation_degrees: float = DEFAULT_TRAIN_ROTATION_DEGREES,
+    early_stopping_patience: int = DEFAULT_EARLY_STOPPING_PATIENCE,
+    early_stopping_min_delta: float = DEFAULT_EARLY_STOPPING_MIN_DELTA,
+    use_class_weights: bool = True,
     progress_callback: ProgressCallback | None = None,
 ) -> TrainSummary:
     _set_seed(seed)
@@ -517,11 +540,18 @@ def _run_resnet18_training(
     model = _build_resnet18(num_classes=len(classes), pretrained=True)
     model.to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    class_weights = None
+    if use_class_weights:
+        class_weights = _compute_class_weights(train_dl.dataset, len(classes), device=device)
+    train_criterion = nn.CrossEntropyLoss(weight=class_weights)
+    eval_criterion = nn.CrossEntropyLoss()
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs, 1))
 
     best_val_acc = -1.0
+    best_epoch = 0
+    epochs_without_improvement = 0
+    stopped_early = False
     best_ckpt = out_dir / "best_model.pt"
     epoch_history: List[Dict[str, object]] = []
     if progress_callback is not None:
@@ -533,12 +563,18 @@ def _run_resnet18_training(
                 "classes": classes,
                 "output_dir": str(out_dir),
                 "device": str(device),
+                "class_weights": class_weights.detach().cpu().tolist() if class_weights is not None else None,
                 "augmentation": {
                     "augment_validation": augment_validation,
                     "noise_std": noise_std,
                     "blur_prob": blur_prob,
                     "erase_prob": erase_prob,
                     "rotation_degrees": rotation_degrees,
+                },
+                "training_controls": {
+                    "early_stopping_patience": early_stopping_patience,
+                    "early_stopping_min_delta": early_stopping_min_delta,
+                    "use_class_weights": use_class_weights,
                 },
             }
         )
@@ -563,7 +599,7 @@ def _run_resnet18_training(
 
             optimizer.zero_grad(set_to_none=True)
             logits = model(images)
-            loss = criterion(logits, labels)
+            loss = train_criterion(logits, labels)
             loss.backward()
             optimizer.step()
 
@@ -579,7 +615,7 @@ def _run_resnet18_training(
             model,
             val_dl,
             device,
-            criterion,
+            eval_criterion,
             image_size,
             augment_validation=augment_validation,
             noise_std=noise_std,
@@ -604,8 +640,12 @@ def _run_resnet18_training(
             f"| val_loss={val_loss:.4f} val_acc={val_acc:.4f}"
         )
 
-        if val_acc > best_val_acc:
+        improvement = val_acc - best_val_acc
+        improved = improvement > early_stopping_min_delta
+        if improved:
             best_val_acc = val_acc
+            best_epoch = epoch
+            epochs_without_improvement = 0
             torch.save(
                 {
                     "model_type": "resnet18",
@@ -615,15 +655,38 @@ def _run_resnet18_training(
                 },
                 best_ckpt,
             )
+        else:
+            epochs_without_improvement += 1
         if progress_callback is not None:
             progress_callback(
                 {
                     "event": "epoch_completed",
                     "model_type": "resnet18",
                     "checkpoint_path": str(best_ckpt),
+                    "epochs_without_improvement": epochs_without_improvement,
                     **epoch_record,
                 }
             )
+        if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
+            stopped_early = True
+            print(
+                f"Early stopping triggered at epoch {epoch:02d}/{epochs} "
+                f"after {epochs_without_improvement} epochs without "
+                f"val_acc improvement greater than {early_stopping_min_delta:.4f}."
+            )
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "event": "early_stopping_triggered",
+                        "model_type": "resnet18",
+                        "stopped_epoch": epoch,
+                        "best_epoch": best_epoch,
+                        "best_val_acc": best_val_acc,
+                        "early_stopping_patience": early_stopping_patience,
+                        "early_stopping_min_delta": early_stopping_min_delta,
+                    }
+                )
+            break
 
     checkpoint = torch.load(best_ckpt, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -631,7 +694,7 @@ def _run_resnet18_training(
         model,
         test_dl,
         device,
-        criterion,
+        eval_criterion,
         image_size,
         augment_validation=augment_validation,
         noise_std=noise_std,
@@ -667,6 +730,14 @@ def _run_resnet18_training(
         "image_size": image_size,
         "seed": seed,
         "device": str(device),
+        "best_epoch": best_epoch,
+        "stopped_early": stopped_early,
+        "class_weights": class_weights.detach().cpu().tolist() if class_weights is not None else None,
+        "training_controls": {
+            "early_stopping_patience": early_stopping_patience,
+            "early_stopping_min_delta": early_stopping_min_delta,
+            "use_class_weights": use_class_weights,
+        },
         "augmentation": {
             "augment_validation": augment_validation,
             "noise_std": noise_std,
@@ -690,6 +761,8 @@ def _run_resnet18_training(
                 "test_acc": test_acc,
                 "checkpoint_path": str(best_ckpt),
                 "metrics_path": str(metrics_path),
+                "best_epoch": best_epoch,
+                "stopped_early": stopped_early,
                 "android_artifact_path": android_artifact_path,
                 "onnx_artifact_path": onnx_artifact_path,
                 "android_metadata_path": android_metadata_path,
@@ -711,14 +784,15 @@ def _run_resnet18_training(
 def _run_yolov8_training(
     prepared_dir: str,
     output_dir: str,
-    epochs: int = 20,
+    epochs: int = DEFAULT_TRAIN_EPOCHS,
     batch_size: int = 32,
-    lr: float = 1e-3,
-    weight_decay: float = 1e-4,
+    lr: float = DEFAULT_TRAIN_LR,
+    weight_decay: float = DEFAULT_TRAIN_WEIGHT_DECAY,
     image_size: int = 224,
     workers: int = 4,
     seed: int = 42,
     yolo_weights: str = "yolov8n-cls.pt",
+    early_stopping_patience: int = DEFAULT_EARLY_STOPPING_PATIENCE,
     progress_callback: ProgressCallback | None = None,
 ) -> TrainSummary:
     try:
@@ -748,6 +822,9 @@ def _run_yolov8_training(
                 "classes": classes,
                 "output_dir": str(out_dir),
                 "yolo_weights": yolo_weights,
+                "training_controls": {
+                    "early_stopping_patience": early_stopping_patience,
+                },
             }
         )
 
@@ -796,6 +873,7 @@ def _run_yolov8_training(
         seed=seed,
         lr0=lr,
         weight_decay=weight_decay,
+        patience=early_stopping_patience,
         project=str(out_dir),
         name="yolov8",
         exist_ok=True,
@@ -869,6 +947,9 @@ def _run_yolov8_training(
         "image_size": image_size,
         "seed": seed,
         "yolo_weights": yolo_weights,
+        "training_controls": {
+            "early_stopping_patience": early_stopping_patience,
+        },
         "augmentation": {
             "degrees": 18.0,
             "translate": 0.12,
@@ -956,10 +1037,10 @@ def _json_safe(value: object) -> object:
 def run_training(
     prepared_dir: str,
     output_dir: str,
-    epochs: int = 20,
+    epochs: int = DEFAULT_TRAIN_EPOCHS,
     batch_size: int = 32,
-    lr: float = 1e-3,
-    weight_decay: float = 1e-4,
+    lr: float = DEFAULT_TRAIN_LR,
+    weight_decay: float = DEFAULT_TRAIN_WEIGHT_DECAY,
     image_size: int = 224,
     workers: int = 4,
     seed: int = 42,
@@ -968,6 +1049,9 @@ def run_training(
     blur_prob: float = DEFAULT_TRAIN_BLUR_PROB,
     erase_prob: float = DEFAULT_TRAIN_ERASE_PROB,
     rotation_degrees: float = DEFAULT_TRAIN_ROTATION_DEGREES,
+    early_stopping_patience: int = DEFAULT_EARLY_STOPPING_PATIENCE,
+    early_stopping_min_delta: float = DEFAULT_EARLY_STOPPING_MIN_DELTA,
+    use_class_weights: bool = True,
     model_type: ModelType = "resnet18",
     yolo_weights: str = "yolov8n-cls.pt",
     progress_callback: ProgressCallback | None = None,
@@ -988,6 +1072,9 @@ def run_training(
             blur_prob=blur_prob,
             erase_prob=erase_prob,
             rotation_degrees=rotation_degrees,
+            early_stopping_patience=early_stopping_patience,
+            early_stopping_min_delta=early_stopping_min_delta,
+            use_class_weights=use_class_weights,
             progress_callback=progress_callback,
         )
     if model_type == "yolov8":
@@ -1002,6 +1089,7 @@ def run_training(
             workers=workers,
             seed=seed,
             yolo_weights=yolo_weights,
+            early_stopping_patience=early_stopping_patience,
             progress_callback=progress_callback,
         )
     raise ValueError("model_type must be 'resnet18' or 'yolov8'.")

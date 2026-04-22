@@ -45,6 +45,9 @@ python main.py preprocess \
   --seed 42
 ```
 
+The split logic is group-aware, so obvious filename variants and exact duplicate
+captures stay in the same split instead of leaking across `train/val/test`.
+
 `--preprocess-device auto` uses CUDA for resize preprocessing when a GPU is available.
 Use `--preprocess-device cuda` to require GPU, or `--preprocess-device cpu` to force CPU.
 Use `--preprocess-device cpu --preprocess-workers 4` or higher to crop/resize images
@@ -75,9 +78,12 @@ python main.py train \
   --prepared-dir data/prepared \
   --output-dir artifacts/resnet18 \
   --model-type resnet18 \
-  --epochs 25 \
+  --epochs 35 \
   --batch-size 32 \
-  --lr 0.001 \
+  --lr 0.0005 \
+  --weight-decay 0.0005 \
+  --early-stopping-patience 8 \
+  --early-stopping-min-delta 0.002 \
   --image-size 224 \
   --workers 4 \
   --seed 42
@@ -91,8 +97,11 @@ python main.py train \
   --output-dir artifacts/yolov8 \
   --model-type yolov8 \
   --yolo-weights yolov8n-cls.pt \
-  --epochs 25 \
+  --epochs 35 \
   --batch-size 32 \
+  --lr 0.0005 \
+  --weight-decay 0.0005 \
+  --early-stopping-patience 8 \
   --image-size 224 \
   --workers 4 \
   --seed 42
@@ -101,6 +110,43 @@ python main.py train \
 During training and testing, resize/crop/flip/color jitter/normalization run on the
 same device as the model. With CUDA available, the repeated per-epoch preprocessing
 uses the GPU instead of your CPU.
+
+For tougher research settings, the training pipeline already enables stronger
+augmentation defaults for ResNet18 and YOLOv8 so performance is less inflated by
+easy samples.
+
+The training pipeline also now enables:
+- early stopping, so runs stop when validation accuracy stops improving,
+- inverse-frequency class weighting for ResNet18 by default, so weak classes have more influence on the loss,
+- metrics logging for these controls in the saved `metrics.json` files.
+
+### Audit split leakage
+
+```bash
+python main.py audit-splits \
+  --prepared-dir data/prepared \
+  --near-duplicate-distance 5 \
+  --max-examples 25 \
+  --workers 4
+```
+
+This writes `data/prepared/split_leakage_audit.json` so you can cite exact-duplicate
+and near-duplicate leakage findings in your technical documentation.
+
+### Analyze prepared dataset balance
+
+```bash
+python main.py analyze-prepared \
+  --prepared-dir data/prepared \
+  --low-sample-threshold 20
+```
+
+This writes `data/prepared/prepared_dataset_analysis.json` with:
+- per-split image counts,
+- per-class totals,
+- minority-to-majority class ratio,
+- low-sample warnings for weak classes,
+- variety and maturity rollups when using `variety_maturity`.
 
 ### Test only (evaluate saved model on test split)
 
@@ -210,6 +256,8 @@ Useful endpoints:
 - `POST /training/start`: start preprocessing/training in the background.
 - `GET /training/status`: check the current training job status.
 - `GET /artifacts/download`: download `.pt` and `.json` artifact files as a ZIP.
+- `GET /reports/model-comparison`: compare ResNet18 and YOLOv8 metrics/curves in one page.
+- `GET /reports/technical-documentation`: open the research-oriented technical report page.
 
 Start training through the API:
 

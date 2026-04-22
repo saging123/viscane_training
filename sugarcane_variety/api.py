@@ -69,10 +69,10 @@ class TrainingRequest(BaseModel):
     val_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
     test_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
     resize: int | None = 256
-    epochs: int = Field(default=25, ge=1)
+    epochs: int = Field(default=35, ge=1)
     batch_size: int = Field(default=32, ge=1)
-    lr: float = Field(default=1e-3, gt=0.0)
-    weight_decay: float = Field(default=1e-4, ge=0.0)
+    lr: float = Field(default=5e-4, gt=0.0)
+    weight_decay: float = Field(default=5e-4, ge=0.0)
     image_size: int = Field(default=224, ge=1)
     workers: int = Field(default=8, ge=0)
     seed: int = 42
@@ -81,6 +81,9 @@ class TrainingRequest(BaseModel):
     blur_prob: float = Field(default=0.30, ge=0.0, le=1.0)
     erase_prob: float = Field(default=0.30, ge=0.0, le=1.0)
     rotation_degrees: float = Field(default=18.0, ge=0.0)
+    early_stopping_patience: int = Field(default=8, ge=0)
+    early_stopping_min_delta: float = Field(default=0.002, ge=0.0)
+    use_class_weights: bool = True
     label_mode: str = "variety_maturity"
     preprocess_device: str = "auto"
     preprocess_workers: int = Field(default=8, ge=1)
@@ -1280,6 +1283,9 @@ def _run_training_job(request: TrainingRequest) -> None:
             blur_prob=request.blur_prob,
             erase_prob=request.erase_prob,
             rotation_degrees=request.rotation_degrees,
+            early_stopping_patience=request.early_stopping_patience,
+            early_stopping_min_delta=request.early_stopping_min_delta,
+            use_class_weights=request.use_class_weights,
             label_mode=request.label_mode,
             preprocess_device=request.preprocess_device,
             preprocess_workers=request.preprocess_workers,
