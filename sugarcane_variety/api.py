@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import html
 import io
 import json
@@ -327,6 +328,63 @@ def _find_report_file(artifacts_dir: Path, name: str) -> Path | None:
     return matches[0] if matches else None
 
 
+def _normalize_metric_key(key: str) -> str:
+    return "".join(ch.lower() for ch in key if ch.isalnum())
+
+
+def _extract_csv_float(row: dict[str, str], candidates: list[str]) -> float | None:
+    normalized = {_normalize_metric_key(key): value for key, value in row.items()}
+    for candidate in candidates:
+        raw = normalized.get(_normalize_metric_key(candidate))
+        if raw in (None, ""):
+            continue
+        try:
+            return float(raw)
+        except ValueError:
+            continue
+    return None
+
+
+def _load_epoch_history_from_results_csv(artifacts_dir: Path) -> list[dict[str, Any]]:
+    results_path = _find_report_file(artifacts_dir, "results.csv")
+    if results_path is None:
+        return []
+
+    history: list[dict[str, Any]] = []
+    try:
+        with results_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            best_val_acc = 0.0
+            for index, row in enumerate(reader, start=1):
+                epoch = _extract_csv_float(row, ["epoch"])
+                val_acc = _extract_csv_float(
+                    row,
+                    [
+                        "metrics/accuracy_top1",
+                        "metrics/top1",
+                        "val/acc_top1",
+                        "accuracy_top1",
+                        "top1",
+                    ],
+                )
+                if val_acc is not None:
+                    best_val_acc = max(best_val_acc, val_acc)
+                history.append(
+                    {
+                        "epoch": int(epoch) + 1 if epoch is not None else index,
+                        "train_loss": _extract_csv_float(row, ["train/loss", "train_loss"]),
+                        "train_acc": _extract_csv_float(row, ["train/acc", "train_acc", "metrics/accuracy_top1"]),
+                        "val_loss": _extract_csv_float(row, ["val/loss", "val_loss"]),
+                        "val_acc": val_acc,
+                        "best_val_acc": best_val_acc if val_acc is not None else None,
+                        "lr": _extract_csv_float(row, ["lr/pg0", "lr0", "lr"]),
+                    }
+                )
+    except OSError:
+        return []
+    return history
+
+
 def _collect_visual_assets(artifacts_dir: Path) -> list[Path]:
     if not artifacts_dir.exists() or not artifacts_dir.is_dir():
         return []
@@ -393,7 +451,7 @@ def _load_epoch_history(model_type: str, metrics: dict[str, Any]) -> list[dict[s
     history = metrics.get("epoch_history")
     if isinstance(history, list):
         return [item for item in history if isinstance(item, dict)]
-    return []
+    return _load_epoch_history_from_results_csv(_model_artifacts_dir(model_type))
 
 
 def _render_epoch_history_table(model_type: str, metrics: dict[str, Any]) -> str:
@@ -533,6 +591,108 @@ def _render_training_graphs(model_type: str, metrics: dict[str, Any]) -> str:
         ),
     ]
     return f"<div class='chart-grid'>{''.join(charts)}</div>"
+
+
+def _render_comparison_graph() -> str:
+    histories: dict[str, list[dict[str, Any]]] = {}
+    for model_type in sorted(SUPPORTED_MODELS):
+        payload = _build_model_doc_payload(model_type)
+        history = _load_epoch_history(model_type, payload["metrics"])
+        if history:
+            histories[model_type] = history
+
+    if not histories:
+        return "<p class='muted'>No cross-model epoch history is available yet. Retrain with the updated code or keep YOLO results.csv in the artifact folder.</p>"
+
+    max_epochs = max(len(history) for history in histories.values())
+    width = 920
+    height = 320
+    pad_left = 56
+    pad_right = 18
+    pad_top = 18
+    pad_bottom = 36
+    plot_width = width - pad_left - pad_right
+    plot_height = height - pad_top - pad_bottom
+    total_points = max(max_epochs - 1, 1)
+
+    series_specs = [
+        ("resnet18", "val_acc", "#3a6b48"),
+        ("yolov8", "val_acc", "#8a3d2f"),
+        ("resnet18", "best_val_acc", "#7fb069"),
+        ("yolov8", "best_val_acc", "#d08b2b"),
+    ]
+    available_series: list[tuple[str, str, str, list[float]]] = []
+    for model_type, key, color in series_specs:
+        history = histories.get(model_type, [])
+        values = [
+            value
+            for item in history
+            if (value := _extract_series_value(item, key)) is not None
+        ]
+        if values:
+            available_series.append((model_type, key, color, values))
+
+    if not available_series:
+        return "<p class='muted'>Epoch history exists, but no comparable validation-accuracy series were found.</p>"
+
+    all_values = [value for _, _, _, values in available_series for value in values]
+    min_value = min(all_values)
+    max_value = max(all_values)
+    if min_value == max_value:
+        min_value -= 1.0
+        max_value += 1.0
+
+    def point_xy(index: int, value: float) -> tuple[float, float]:
+        x = pad_left + (plot_width * index / total_points)
+        y = pad_top + plot_height - ((value - min_value) / (max_value - min_value) * plot_height)
+        return x, y
+
+    grid_lines = []
+    for step in range(5):
+        y = pad_top + plot_height * step / 4
+        value = max_value - ((max_value - min_value) * step / 4)
+        grid_lines.append(
+            f"<line x1='{pad_left}' y1='{y:.1f}' x2='{width - pad_right}' y2='{y:.1f}' stroke='#d8cfbf' stroke-dasharray='4 4' />"
+            f"<text x='8' y='{y + 4:.1f}' font-size='11' fill='#5f6b61'>{html.escape(_format_metric_value(value))}</text>"
+        )
+
+    legend: list[str] = []
+    paths: list[str] = []
+    for model_type, key, color, values in available_series:
+        path_parts: list[str] = []
+        for point_index, value in enumerate(values):
+            x, y = point_xy(point_index, value)
+            command = "M" if point_index == 0 else "L"
+            path_parts.append(f"{command}{x:.1f},{y:.1f}")
+        label = f"{model_type} {'best val acc' if key == 'best_val_acc' else 'val acc'}"
+        paths.append(
+            f"<path d='{' '.join(path_parts)}' fill='none' stroke='{color}' stroke-width='2.8' stroke-linecap='round' stroke-linejoin='round' />"
+        )
+        legend.append(
+            f"<span class='legend-item'><span class='legend-swatch' style='background:{color}'></span>{html.escape(label)}</span>"
+        )
+
+    x_labels = []
+    for point_index in range(max_epochs):
+        if point_index in {0, max_epochs - 1} or point_index % max(max_epochs // 8, 1) == 0:
+            x, _ = point_xy(point_index, min_value)
+            x_labels.append(
+                f"<text x='{x:.1f}' y='{height - 10}' font-size='11' text-anchor='middle' fill='#5f6b61'>E{point_index + 1}</text>"
+            )
+
+    return (
+        "<article class='card'>"
+        "<h2>Cross-Model Validation Accuracy Comparison</h2>"
+        "<p class='muted'>This combined chart overlays validation accuracy trends for ResNet18 and YOLOv8 using saved epoch history or YOLO results.csv when available.</p>"
+        f"<div class='legend'>{''.join(legend)}</div>"
+        f"<svg viewBox='0 0 {width} {height}' role='img' aria-label='Cross-model validation accuracy comparison'>"
+        f"{''.join(grid_lines)}"
+        f"<line x1='{pad_left}' y1='{height - pad_bottom}' x2='{width - pad_right}' y2='{height - pad_bottom}' stroke='#7d857d' />"
+        f"<line x1='{pad_left}' y1='{pad_top}' x2='{pad_left}' y2='{height - pad_bottom}' stroke='#7d857d' />"
+        f"{''.join(paths)}"
+        f"{''.join(x_labels)}"
+        "</svg></article>"
+    )
 
 
 def _render_top_confusions(test_summary: dict[str, Any] | None) -> str:
@@ -924,6 +1084,7 @@ def _build_technical_documentation_html() -> str:
           <tbody>{''.join(comparison_rows)}</tbody>
         </table>
       </article>
+      {_render_comparison_graph()}
     </section>
     {_render_model_doc_section("resnet18")}
     {_render_model_doc_section("yolov8")}

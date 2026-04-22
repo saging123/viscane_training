@@ -21,10 +21,10 @@ from torchvision.models import ResNet18_Weights
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 DEFAULT_ONNX_OPSETS = (16, 17)
-DEFAULT_TRAIN_NOISE_STD = 0.04
-DEFAULT_TRAIN_BLUR_PROB = 0.20
-DEFAULT_TRAIN_ERASE_PROB = 0.20
-DEFAULT_TRAIN_ROTATION_DEGREES = 12.0
+DEFAULT_TRAIN_NOISE_STD = 0.07
+DEFAULT_TRAIN_BLUR_PROB = 0.30
+DEFAULT_TRAIN_ERASE_PROB = 0.30
+DEFAULT_TRAIN_ROTATION_DEGREES = 18.0
 ModelType = Literal["resnet18", "yolov8"]
 ProgressCallback = Callable[[Dict[str, Any]], None]
 
@@ -799,6 +799,15 @@ def _run_yolov8_training(
         project=str(out_dir),
         name="yolov8",
         exist_ok=True,
+        degrees=18.0,
+        translate=0.12,
+        scale=0.25,
+        fliplr=0.5,
+        flipud=0.12,
+        hsv_h=0.02,
+        hsv_s=0.75,
+        hsv_v=0.45,
+        erasing=0.35,
     )
 
     save_dir = Path(getattr(train_result, "save_dir", out_dir / "yolov8"))
@@ -860,6 +869,17 @@ def _run_yolov8_training(
         "image_size": image_size,
         "seed": seed,
         "yolo_weights": yolo_weights,
+        "augmentation": {
+            "degrees": 18.0,
+            "translate": 0.12,
+            "scale": 0.25,
+            "fliplr": 0.5,
+            "flipud": 0.12,
+            "hsv_h": 0.02,
+            "hsv_s": 0.75,
+            "hsv_v": 0.45,
+            "erasing": 0.35,
+        },
         "epoch_history": epoch_history,
         "onnx_artifact_path": onnx_artifact_path,
         "android_metadata_path": android_metadata_path,
