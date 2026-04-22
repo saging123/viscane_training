@@ -136,6 +136,9 @@ def _split_class_items(
 
 def _group_key_from_path(path: Path) -> str:
     stem = path.stem.strip().lower()
+    capture_match = re.search(r"(img_\d{8}_\d{6}[a-z]?)", stem)
+    if capture_match:
+        return capture_match.group(1)
     stem = re.sub(r"\s*\(\d+\)$", "", stem)
     stem = re.sub(r"[_\-\s]+copy$", "", stem)
     stem = re.sub(r"[_\-\s]+edited$", "", stem)
@@ -144,17 +147,73 @@ def _group_key_from_path(path: Path) -> str:
     return stem or path.stem.lower()
 
 
+def _content_hash_worker(path: str) -> tuple[str, str]:
+    path_obj = Path(path)
+    return path, hashlib.sha1(path_obj.read_bytes()).hexdigest()
+
+
+def _compute_content_hashes(
+    paths: List[Path],
+    workers: int,
+) -> Dict[Path, str]:
+    if workers <= 1:
+        return {path: hashlib.sha1(path.read_bytes()).hexdigest() for path in paths}
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        rows = list(executor.map(_content_hash_worker, [str(path) for path in paths]))
+    return {Path(raw_path): content_hash for raw_path, content_hash in rows}
+
+
+def _group_items_for_splitting(
+    items: List[Path],
+    workers: int,
+) -> List[List[Path]]:
+    if not items:
+        return []
+
+    content_hashes = _compute_content_hashes(items, workers=workers)
+    parent = list(range(len(items)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        root_left = find(left)
+        root_right = find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    seen_capture_keys: Dict[str, int] = {}
+    seen_content_hashes: Dict[str, int] = {}
+    for index, item in enumerate(items):
+        capture_key = _group_key_from_path(item)
+        content_hash = content_hashes[item]
+        if capture_key in seen_capture_keys:
+            union(index, seen_capture_keys[capture_key])
+        else:
+            seen_capture_keys[capture_key] = index
+        if content_hash in seen_content_hashes:
+            union(index, seen_content_hashes[content_hash])
+        else:
+            seen_content_hashes[content_hash] = index
+
+    grouped_items: Dict[int, List[Path]] = {}
+    for index, item in enumerate(items):
+        grouped_items.setdefault(find(index), []).append(item)
+    return list(grouped_items.values())
+
+
 def _split_class_items_grouped(
     items: List[Path],
     val_ratio: float,
     test_ratio: float,
     rng: random.Random,
+    workers: int,
 ) -> Dict[str, List[Path]]:
-    grouped_items: Dict[str, List[Path]] = {}
-    for item in items:
-        grouped_items.setdefault(_group_key_from_path(item), []).append(item)
-
-    groups = list(grouped_items.values())
+    groups = _group_items_for_splitting(items, workers=workers)
     rng.shuffle(groups)
     groups.sort(key=len, reverse=True)
 
@@ -388,6 +447,7 @@ def run_preprocess(
             val_ratio=val_ratio,
             test_ratio=test_ratio,
             rng=rng,
+            workers=preprocess_workers,
         )
 
         save_tasks: List[tuple[Path, Path]] = []
