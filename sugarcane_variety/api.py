@@ -77,10 +77,10 @@ class TrainingRequest(BaseModel):
     workers: int = Field(default=8, ge=0)
     seed: int = 42
     augment_validation: bool = False
-    noise_std: float = Field(default=0.04, ge=0.0)
-    blur_prob: float = Field(default=0.20, ge=0.0, le=1.0)
-    erase_prob: float = Field(default=0.20, ge=0.0, le=1.0)
-    rotation_degrees: float = Field(default=12.0, ge=0.0)
+    noise_std: float = Field(default=0.07, ge=0.0)
+    blur_prob: float = Field(default=0.30, ge=0.0, le=1.0)
+    erase_prob: float = Field(default=0.30, ge=0.0, le=1.0)
+    rotation_degrees: float = Field(default=18.0, ge=0.0)
     label_mode: str = "variety_maturity"
     preprocess_device: str = "auto"
     preprocess_workers: int = Field(default=8, ge=1)
@@ -593,18 +593,18 @@ def _render_training_graphs(model_type: str, metrics: dict[str, Any]) -> str:
     return f"<div class='chart-grid'>{''.join(charts)}</div>"
 
 
-def _render_comparison_graph() -> str:
-    histories: dict[str, list[dict[str, Any]]] = {}
-    for model_type in sorted(SUPPORTED_MODELS):
-        payload = _build_model_doc_payload(model_type)
-        history = _load_epoch_history(model_type, payload["metrics"])
-        if history:
-            histories[model_type] = history
+def _render_multi_history_chart(
+    histories: dict[str, list[dict[str, Any]]],
+    title: str,
+    series_specs: list[tuple[str, str, str, str]],
+) -> str:
+    available_histories = {
+        model_type: history for model_type, history in histories.items() if history
+    }
+    if not available_histories:
+        return "<p class='muted'>No cross-model chart data is available.</p>"
 
-    if not histories:
-        return "<p class='muted'>No cross-model epoch history is available yet. Retrain with the updated code or keep YOLO results.csv in the artifact folder.</p>"
-
-    max_epochs = max(len(history) for history in histories.values())
+    max_epochs = max(len(history) for history in available_histories.values())
     width = 920
     height = 320
     pad_left = 56
@@ -615,25 +615,19 @@ def _render_comparison_graph() -> str:
     plot_height = height - pad_top - pad_bottom
     total_points = max(max_epochs - 1, 1)
 
-    series_specs = [
-        ("resnet18", "val_acc", "#3a6b48"),
-        ("yolov8", "val_acc", "#8a3d2f"),
-        ("resnet18", "best_val_acc", "#7fb069"),
-        ("yolov8", "best_val_acc", "#d08b2b"),
-    ]
     available_series: list[tuple[str, str, str, list[float]]] = []
-    for model_type, key, color in series_specs:
-        history = histories.get(model_type, [])
+    for model_type, label, key, color in series_specs:
+        history = available_histories.get(model_type, [])
         values = [
             value
             for item in history
             if (value := _extract_series_value(item, key)) is not None
         ]
         if values:
-            available_series.append((model_type, key, color, values))
+            available_series.append((label, color, key, values))
 
     if not available_series:
-        return "<p class='muted'>Epoch history exists, but no comparable validation-accuracy series were found.</p>"
+        return "<p class='muted'>Epoch history exists, but no comparable chart series were found.</p>"
 
     all_values = [value for _, _, _, values in available_series for value in values]
     min_value = min(all_values)
@@ -658,13 +652,12 @@ def _render_comparison_graph() -> str:
 
     legend: list[str] = []
     paths: list[str] = []
-    for model_type, key, color, values in available_series:
+    for label, color, _key, values in available_series:
         path_parts: list[str] = []
         for point_index, value in enumerate(values):
             x, y = point_xy(point_index, value)
             command = "M" if point_index == 0 else "L"
             path_parts.append(f"{command}{x:.1f},{y:.1f}")
-        label = f"{model_type} {'best val acc' if key == 'best_val_acc' else 'val acc'}"
         paths.append(
             f"<path d='{' '.join(path_parts)}' fill='none' stroke='{color}' stroke-width='2.8' stroke-linecap='round' stroke-linejoin='round' />"
         )
@@ -681,17 +674,71 @@ def _render_comparison_graph() -> str:
             )
 
     return (
-        "<article class='card'>"
-        "<h2>Cross-Model Validation Accuracy Comparison</h2>"
-        "<p class='muted'>This combined chart overlays validation accuracy trends for ResNet18 and YOLOv8 using saved epoch history or YOLO results.csv when available.</p>"
+        f"<div class='chart-card'><h4>{html.escape(title)}</h4>"
         f"<div class='legend'>{''.join(legend)}</div>"
-        f"<svg viewBox='0 0 {width} {height}' role='img' aria-label='Cross-model validation accuracy comparison'>"
+        f"<svg viewBox='0 0 {width} {height}' role='img' aria-label='{html.escape(title)}'>"
         f"{''.join(grid_lines)}"
         f"<line x1='{pad_left}' y1='{height - pad_bottom}' x2='{width - pad_right}' y2='{height - pad_bottom}' stroke='#7d857d' />"
         f"<line x1='{pad_left}' y1='{pad_top}' x2='{pad_left}' y2='{height - pad_bottom}' stroke='#7d857d' />"
         f"{''.join(paths)}"
         f"{''.join(x_labels)}"
-        "</svg></article>"
+        "</svg></div>"
+    )
+
+
+def _render_comparison_graphs() -> str:
+    histories: dict[str, list[dict[str, Any]]] = {}
+    for model_type in sorted(SUPPORTED_MODELS):
+        payload = _build_model_doc_payload(model_type)
+        history = _load_epoch_history(model_type, payload["metrics"])
+        if history:
+            histories[model_type] = history
+
+    if not histories:
+        return "<p class='muted'>No cross-model epoch history is available yet. Retrain with the updated code or keep YOLO results.csv in the artifact folder.</p>"
+    charts = [
+        _render_multi_history_chart(
+            histories,
+            "Combined Training Loss",
+            [
+                ("resnet18", "ResNet18 Train Loss", "train_loss", "#8a3d2f"),
+                ("yolov8", "YOLOv8 Train Loss", "train_loss", "#255f85"),
+            ],
+        ),
+        _render_multi_history_chart(
+            histories,
+            "Combined Validation Loss",
+            [
+                ("resnet18", "ResNet18 Validation Loss", "val_loss", "#3a6b48"),
+                ("yolov8", "YOLOv8 Validation Loss", "val_loss", "#7b4ec9"),
+            ],
+        ),
+        _render_multi_history_chart(
+            histories,
+            "Combined Training Accuracy",
+            [
+                ("resnet18", "ResNet18 Train Accuracy", "train_acc", "#d08b2b"),
+                ("yolov8", "YOLOv8 Train Accuracy", "train_acc", "#5e8c31"),
+            ],
+        ),
+        _render_multi_history_chart(
+            histories,
+            "Combined Validation Accuracy",
+            [
+                ("resnet18", "ResNet18 Validation Accuracy", "val_acc", "#3a6b48"),
+                ("yolov8", "YOLOv8 Validation Accuracy", "val_acc", "#8a3d2f"),
+                ("resnet18", "ResNet18 Best Validation Accuracy", "best_val_acc", "#7fb069"),
+                ("yolov8", "YOLOv8 Best Validation Accuracy", "best_val_acc", "#d08b2b"),
+            ],
+        ),
+    ]
+
+    return (
+        "<article class='card'>"
+        "<h2>Cross-Model Training and Validation Comparison</h2>"
+        "<p class='muted'>These shared charts normalize saved ResNet18 and YOLOv8 epoch history into comparable train/validation loss and accuracy views. YOLO falls back to results.csv when JSON epoch history is not available.</p>"
+        f"<div class='chart-grid'>{''.join(charts)}</div>"
+        "</article>"
     )
 
 
@@ -834,6 +881,13 @@ def _render_model_doc_section(model_type: str) -> str:
             ("Blur Probability", "blur_prob"),
             ("Erase Probability", "erase_prob"),
             ("Rotation Degrees", "rotation_degrees"),
+            ("Translate", "translate"),
+            ("Scale", "scale"),
+            ("Flip Left/Right", "fliplr"),
+            ("Flip Up/Down", "flipud"),
+            ("HSV Hue", "hsv_h"),
+            ("HSV Saturation", "hsv_s"),
+            ("HSV Value", "hsv_v"),
         ],
     )
 
@@ -1084,7 +1138,7 @@ def _build_technical_documentation_html() -> str:
           <tbody>{''.join(comparison_rows)}</tbody>
         </table>
       </article>
-      {_render_comparison_graph()}
+      {_render_comparison_graphs()}
     </section>
     {_render_model_doc_section("resnet18")}
     {_render_model_doc_section("yolov8")}

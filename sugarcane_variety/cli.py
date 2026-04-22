@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import argparse
 
-from sugarcane_variety.preprocess import run_preprocess, run_preprocess_flat
+from sugarcane_variety.preprocess import (
+    audit_prepared_splits,
+    run_preprocess,
+    run_preprocess_flat,
+)
 from sugarcane_variety.train import run_evaluation, run_training
 
 
@@ -82,6 +86,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="CPU workers for image validation and preprocessing.",
     )
 
+    audit = subparsers.add_parser(
+        "audit-splits",
+        help="Audit prepared train/val/test folders for duplicate leakage.",
+    )
+    audit.add_argument("--prepared-dir", required=True, help="Prepared dataset root.")
+    audit.add_argument(
+        "--near-duplicate-distance",
+        type=int,
+        default=5,
+        help="Maximum perceptual hash Hamming distance to flag as near-duplicate.",
+    )
+    audit.add_argument(
+        "--max-examples",
+        type=int,
+        default=25,
+        help="Maximum suspicious examples to include in the report.",
+    )
+    audit.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel workers for image hashing during the audit.",
+    )
+
     train = subparsers.add_parser("train", help="Train model on prepared dataset.")
     train.add_argument("--prepared-dir", required=True, help="Prepared dataset root.")
     train.add_argument(
@@ -106,25 +134,25 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--noise-std",
         type=float,
-        default=0.04,
+        default=0.07,
         help="Gaussian noise strength for ResNet training images.",
     )
     train.add_argument(
         "--blur-prob",
         type=float,
-        default=0.20,
+        default=0.30,
         help="Probability of Gaussian blur for ResNet training images.",
     )
     train.add_argument(
         "--erase-prob",
         type=float,
-        default=0.20,
+        default=0.30,
         help="Probability of random erasing for ResNet training images.",
     )
     train.add_argument(
         "--rotation-degrees",
         type=float,
-        default=12.0,
+        default=18.0,
         help="Maximum random rotation in degrees for ResNet training images.",
     )
     train.add_argument(
@@ -192,25 +220,25 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument(
         "--noise-std",
         type=float,
-        default=0.04,
+        default=0.07,
         help="Gaussian noise strength for ResNet training images.",
     )
     all_cmd.add_argument(
         "--blur-prob",
         type=float,
-        default=0.20,
+        default=0.30,
         help="Probability of Gaussian blur for ResNet training images.",
     )
     all_cmd.add_argument(
         "--erase-prob",
         type=float,
-        default=0.20,
+        default=0.30,
         help="Probability of random erasing for ResNet training images.",
     )
     all_cmd.add_argument(
         "--rotation-degrees",
         type=float,
-        default=12.0,
+        default=18.0,
         help="Maximum random rotation in degrees for ResNet training images.",
     )
     all_cmd.add_argument(
@@ -288,6 +316,31 @@ def main() -> None:
         print(f"Classes: {len(summary.classes)} -> {summary.classes}")
         print(f"Total images: {summary.total_count}")
         print(f"Skipped corrupt images: {summary.skipped_corrupt}")
+        return
+
+    if args.command == "audit-splits":
+        summary = audit_prepared_splits(
+            prepared_dir=args.prepared_dir,
+            near_duplicate_distance=args.near_duplicate_distance,
+            max_examples=args.max_examples,
+            workers=args.workers,
+        )
+        print("Split audit complete")
+        print(f"Prepared dir: {summary.prepared_dir}")
+        print(f"Total images: {summary.total_images}")
+        print(f"Exact duplicate groups: {summary.exact_duplicate_groups}")
+        print(f"Cross-split exact duplicate groups: {summary.cross_split_exact_groups}")
+        print(f"Near-duplicate groups: {summary.near_duplicate_groups}")
+        print(f"Cross-split near-duplicate groups: {summary.cross_split_near_groups}")
+        print(f"Summary JSON: {summary.summary_json_path}")
+        if summary.suspicious_examples:
+            print("Suspicious examples:")
+            for example in summary.suspicious_examples[:10]:
+                print(f"- type={example['type']} splits={example['splits']}")
+                for item in example["items"]:
+                    print(
+                        f"  path={item['relative_path']} class={item['class_name']}"
+                    )
         return
 
     if args.command == "train":

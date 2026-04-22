@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
 import hashlib
+import json
 import random
 import shutil
 from dataclasses import dataclass
@@ -34,8 +35,33 @@ class FlatPreprocessSummary:
     skipped_corrupt: int
 
 
+@dataclass
+class SplitLeakageSummary:
+    prepared_dir: str
+    total_images: int
+    exact_duplicate_groups: int
+    near_duplicate_groups: int
+    cross_split_exact_groups: int
+    cross_split_near_groups: int
+    suspicious_examples: List[Dict[str, object]]
+    summary_json_path: str
+
+
 def _is_image_file(path: Path) -> bool:
     return path.suffix.lower() in VALID_EXTENSIONS
+
+
+def _average_hash(path: Path, hash_size: int = 8) -> str:
+    with Image.open(path) as img:
+        img = img.convert("L").resize((hash_size, hash_size), Image.Resampling.BILINEAR)
+        pixels = list(img.getdata())
+    mean_value = sum(pixels) / max(len(pixels), 1)
+    bits = "".join("1" if pixel >= mean_value else "0" for pixel in pixels)
+    return f"{int(bits, 2):0{hash_size * hash_size // 4}x}"
+
+
+def _hamming_distance(hash_a: str, hash_b: str) -> int:
+    return (int(hash_a, 16) ^ int(hash_b, 16)).bit_count()
 
 
 def _collect_images(raw_dir: Path) -> Dict[str, List[Path]]:
@@ -225,6 +251,13 @@ def _save_processed_image_worker(
     )
 
 
+def _audit_image_worker(path: str) -> tuple[str, str, str]:
+    path_obj = Path(path)
+    content_hash = hashlib.sha1(path_obj.read_bytes()).hexdigest()
+    perceptual_hash = _average_hash(path_obj)
+    return path, content_hash, perceptual_hash
+
+
 def _save_processed_images(
     tasks: List[tuple[Path, Path]],
     image_size: int | None,
@@ -388,4 +421,137 @@ def run_preprocess_flat(
         class_counts=class_counts,
         total_count=total_count,
         skipped_corrupt=skipped_corrupt,
+    )
+
+
+def audit_prepared_splits(
+    prepared_dir: str,
+    near_duplicate_distance: int = 5,
+    max_examples: int = 25,
+    workers: int = 1,
+) -> SplitLeakageSummary:
+    prepared_path = Path(prepared_dir).expanduser().resolve()
+    if not prepared_path.exists():
+        raise FileNotFoundError(f"Prepared dataset path does not exist: {prepared_path}")
+    if near_duplicate_distance < 0:
+        raise ValueError("near_duplicate_distance must be non-negative.")
+    if max_examples < 1:
+        raise ValueError("max_examples must be at least 1.")
+
+    image_paths = sorted(
+        path
+        for split_name in ("train", "val", "test")
+        for path in (prepared_path / split_name).rglob("*")
+        if path.is_file() and _is_image_file(path)
+    )
+    if not image_paths:
+        raise ValueError(f"No prepared images found under: {prepared_path}")
+
+    if workers <= 1:
+        audit_rows = [_audit_image_worker(str(path)) for path in image_paths]
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            audit_rows = list(executor.map(_audit_image_worker, [str(path) for path in image_paths]))
+
+    image_infos: List[Dict[str, object]] = []
+    by_content_hash: Dict[str, List[Dict[str, object]]] = {}
+    for raw_path, content_hash, perceptual_hash in audit_rows:
+        path = Path(raw_path)
+        relative = path.relative_to(prepared_path)
+        parts = relative.parts
+        split_name = parts[0] if parts else "unknown"
+        class_name = parts[1] if len(parts) > 1 else "unknown"
+        info = {
+            "path": str(path),
+            "relative_path": str(relative),
+            "split": split_name,
+            "class_name": class_name,
+            "content_hash": content_hash,
+            "perceptual_hash": perceptual_hash,
+        }
+        image_infos.append(info)
+        by_content_hash.setdefault(content_hash, []).append(info)
+
+    suspicious_examples: List[Dict[str, object]] = []
+
+    exact_duplicate_groups = 0
+    cross_split_exact_groups = 0
+    for content_hash, items in by_content_hash.items():
+        if len(items) < 2:
+            continue
+        exact_duplicate_groups += 1
+        splits = sorted({str(item["split"]) for item in items})
+        if len(splits) > 1 and len(suspicious_examples) < max_examples:
+            cross_split_exact_groups += 1
+            suspicious_examples.append(
+                {
+                    "type": "exact_duplicate",
+                    "content_hash": content_hash,
+                    "splits": splits,
+                    "items": [
+                        {
+                            "relative_path": str(item["relative_path"]),
+                            "class_name": str(item["class_name"]),
+                        }
+                        for item in items[:6]
+                    ],
+                }
+            )
+        elif len(splits) > 1:
+            cross_split_exact_groups += 1
+
+    near_duplicate_groups = 0
+    cross_split_near_groups = 0
+    for index, current in enumerate(image_infos):
+        current_split = str(current["split"])
+        current_hash = str(current["perceptual_hash"])
+        for other in image_infos[index + 1 :]:
+            if str(current["content_hash"]) == str(other["content_hash"]):
+                continue
+            distance = _hamming_distance(current_hash, str(other["perceptual_hash"]))
+            if distance > near_duplicate_distance:
+                continue
+            near_duplicate_groups += 1
+            if current_split != str(other["split"]):
+                cross_split_near_groups += 1
+                if len(suspicious_examples) < max_examples:
+                    suspicious_examples.append(
+                        {
+                            "type": "near_duplicate",
+                            "distance": distance,
+                            "splits": sorted({current_split, str(other["split"])}),
+                            "items": [
+                                {
+                                    "relative_path": str(current["relative_path"]),
+                                    "class_name": str(current["class_name"]),
+                                },
+                                {
+                                    "relative_path": str(other["relative_path"]),
+                                    "class_name": str(other["class_name"]),
+                                },
+                            ],
+                        }
+                    )
+
+    summary = {
+        "prepared_dir": str(prepared_path),
+        "total_images": len(image_infos),
+        "exact_duplicate_groups": exact_duplicate_groups,
+        "near_duplicate_groups": near_duplicate_groups,
+        "cross_split_exact_groups": cross_split_exact_groups,
+        "cross_split_near_groups": cross_split_near_groups,
+        "suspicious_examples": suspicious_examples,
+    }
+    summary_json_path = prepared_path / "split_leakage_audit.json"
+    summary_json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    return SplitLeakageSummary(
+        prepared_dir=str(prepared_path),
+        total_images=len(image_infos),
+        exact_duplicate_groups=exact_duplicate_groups,
+        near_duplicate_groups=near_duplicate_groups,
+        cross_split_exact_groups=cross_split_exact_groups,
+        cross_split_near_groups=cross_split_near_groups,
+        suspicious_examples=suspicious_examples,
+        summary_json_path=str(summary_json_path),
     )
