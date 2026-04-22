@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RAW_DIR="${1:-content/data/raw}"
+RAW_DIR="${1:-content/data/raw/DATASETSFINAL}"
 PREPARED_DIR="${2:-content/data/prepared}"
 LABEL_MODE="${LABEL_MODE:-variety_maturity}"
 RESIZE="${RESIZE:-256}"

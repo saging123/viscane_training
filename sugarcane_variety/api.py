@@ -63,7 +63,7 @@ current_training_report: dict[str, Any] = {
 
 class TrainingRequest(BaseModel):
     model_type: str = "resnet18"
-    raw_dir: str = "content/data/raw"
+    raw_dir: str = "content/data/raw/DATASETSFINAL"
     prepared_dir: str = "content/data/prepared"
     output_dir: str = "content/data/sugarcane_artifacts"
     val_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
