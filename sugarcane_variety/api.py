@@ -75,6 +75,11 @@ class TrainingRequest(BaseModel):
     image_size: int = Field(default=224, ge=1)
     workers: int = Field(default=8, ge=0)
     seed: int = 42
+    augment_validation: bool = False
+    noise_std: float = Field(default=0.04, ge=0.0)
+    blur_prob: float = Field(default=0.20, ge=0.0, le=1.0)
+    erase_prob: float = Field(default=0.20, ge=0.0, le=1.0)
+    rotation_degrees: float = Field(default=12.0, ge=0.0)
     label_mode: str = "variety_maturity"
     preprocess_device: str = "auto"
     preprocess_workers: int = Field(default=8, ge=1)
@@ -357,31 +362,177 @@ def _render_definition_rows(data: dict[str, Any], keys: list[tuple[str, str]]) -
     return "".join(rows)
 
 
-def _render_epoch_history_table(model_type: str) -> str:
+def _coerce_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_series_value(item: dict[str, Any], key: str) -> float | None:
+    if key in item:
+        return _coerce_float(item.get(key))
+    metrics = item.get("metrics")
+    if isinstance(metrics, dict):
+        for candidate in [key, key.replace("_", "/"), key.replace("_", "-"), key.replace("_", "")]:
+            if candidate in metrics:
+                return _coerce_float(metrics.get(candidate))
+    return None
+
+
+def _load_epoch_history(model_type: str, metrics: dict[str, Any]) -> list[dict[str, Any]]:
     with report_lock:
         live_model_type = str(current_training_report.get("model_type", ""))
-        epoch_history = list(current_training_report.get("epoch_history", []))
+        live_history = list(current_training_report.get("epoch_history", []))
 
-    if live_model_type != model_type or not epoch_history:
-        return "<p class='muted'>No live epoch history is available for this model in the current API session.</p>"
+    if live_model_type == model_type and live_history:
+        return live_history
+
+    history = metrics.get("epoch_history")
+    if isinstance(history, list):
+        return [item for item in history if isinstance(item, dict)]
+    return []
+
+
+def _render_epoch_history_table(model_type: str, metrics: dict[str, Any]) -> str:
+    epoch_history = _load_epoch_history(model_type, metrics)
+
+    if not epoch_history:
+        return "<p class='muted'>No epoch history is available for this model.</p>"
 
     header = (
         "<tr><th>Epoch</th><th>Train Loss</th><th>Train Acc</th>"
-        "<th>Val Loss</th><th>Val Acc</th><th>Best Val Acc</th></tr>"
+        "<th>Val Loss</th><th>Val Acc</th><th>Best Val Acc</th><th>Learning Rate</th></tr>"
     )
     rows: list[str] = []
     for item in epoch_history[-20:]:
         rows.append(
             "<tr>"
             f"<td>{html.escape(str(item.get('epoch', 'n/a')))}</td>"
-            f"<td>{html.escape(_format_metric_value(item.get('train_loss')))}</td>"
-            f"<td>{html.escape(_format_metric_value(item.get('train_acc')))}</td>"
-            f"<td>{html.escape(_format_metric_value(item.get('val_loss')))}</td>"
-            f"<td>{html.escape(_format_metric_value(item.get('val_acc')))}</td>"
-            f"<td>{html.escape(_format_metric_value(item.get('best_val_acc')))}</td>"
+            f"<td>{html.escape(_format_metric_value(_extract_series_value(item, 'train_loss')))}</td>"
+            f"<td>{html.escape(_format_metric_value(_extract_series_value(item, 'train_acc')))}</td>"
+            f"<td>{html.escape(_format_metric_value(_extract_series_value(item, 'val_loss')))}</td>"
+            f"<td>{html.escape(_format_metric_value(_extract_series_value(item, 'val_acc')))}</td>"
+            f"<td>{html.escape(_format_metric_value(_extract_series_value(item, 'best_val_acc')))}</td>"
+            f"<td>{html.escape(_format_metric_value(_extract_series_value(item, 'lr')))}</td>"
             "</tr>"
         )
     return f"<table><thead>{header}</thead><tbody>{''.join(rows)}</tbody></table>"
+
+
+def _render_line_chart(
+    epoch_history: list[dict[str, Any]],
+    title: str,
+    series_specs: list[tuple[str, str, str]],
+) -> str:
+    if not epoch_history:
+        return "<p class='muted'>No chart data available.</p>"
+
+    values_by_series: list[tuple[str, str, list[float]]] = []
+    for label, key, color in series_specs:
+        values = [
+            value
+            for item in epoch_history
+            if (value := _extract_series_value(item, key)) is not None
+        ]
+        if values:
+            values_by_series.append((label, color, values))
+
+    if not values_by_series:
+        return "<p class='muted'>No numeric chart series were found in the saved epoch history.</p>"
+
+    all_values = [value for _, _, values in values_by_series for value in values]
+    min_value = min(all_values)
+    max_value = max(all_values)
+    if min_value == max_value:
+        min_value -= 1.0
+        max_value += 1.0
+
+    width = 760
+    height = 280
+    pad_left = 56
+    pad_right = 18
+    pad_top = 18
+    pad_bottom = 36
+    plot_width = width - pad_left - pad_right
+    plot_height = height - pad_top - pad_bottom
+    total_points = max(len(epoch_history) - 1, 1)
+
+    def point_xy(index: int, value: float) -> tuple[float, float]:
+        x = pad_left + (plot_width * index / total_points)
+        y = pad_top + plot_height - ((value - min_value) / (max_value - min_value) * plot_height)
+        return x, y
+
+    grid_lines = []
+    for step in range(5):
+        y = pad_top + plot_height * step / 4
+        value = max_value - ((max_value - min_value) * step / 4)
+        grid_lines.append(
+            f"<line x1='{pad_left}' y1='{y:.1f}' x2='{width - pad_right}' y2='{y:.1f}' stroke='#d8cfbf' stroke-dasharray='4 4' />"
+            f"<text x='8' y='{y + 4:.1f}' font-size='11' fill='#5f6b61'>{html.escape(_format_metric_value(value))}</text>"
+        )
+
+    series_paths: list[str] = []
+    legend: list[str] = []
+    for idx, (label, color, values) in enumerate(values_by_series):
+        path_parts: list[str] = []
+        for point_index, value in enumerate(values):
+            x, y = point_xy(point_index, value)
+            command = "M" if point_index == 0 else "L"
+            path_parts.append(f"{command}{x:.1f},{y:.1f}")
+        series_paths.append(
+            f"<path d='{' '.join(path_parts)}' fill='none' stroke='{color}' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round' />"
+        )
+        legend.append(
+            f"<span class='legend-item'><span class='legend-swatch' style='background:{color}'></span>{html.escape(label)}</span>"
+        )
+
+    x_labels = []
+    for point_index, item in enumerate(epoch_history):
+        if point_index in {0, len(epoch_history) - 1} or point_index % max(len(epoch_history) // 6, 1) == 0:
+            x, _ = point_xy(point_index, min_value)
+            x_labels.append(
+                f"<text x='{x:.1f}' y='{height - 10}' font-size='11' text-anchor='middle' fill='#5f6b61'>E{html.escape(str(item.get('epoch', point_index + 1)))}</text>"
+            )
+
+    return (
+        f"<div class='chart-card'><h4>{html.escape(title)}</h4>"
+        f"<div class='legend'>{''.join(legend)}</div>"
+        f"<svg viewBox='0 0 {width} {height}' role='img' aria-label='{html.escape(title)}'>"
+        f"{''.join(grid_lines)}"
+        f"<line x1='{pad_left}' y1='{height - pad_bottom}' x2='{width - pad_right}' y2='{height - pad_bottom}' stroke='#7d857d' />"
+        f"<line x1='{pad_left}' y1='{pad_top}' x2='{pad_left}' y2='{height - pad_bottom}' stroke='#7d857d' />"
+        f"{''.join(series_paths)}"
+        f"{''.join(x_labels)}"
+        "</svg></div>"
+    )
+
+
+def _render_training_graphs(model_type: str, metrics: dict[str, Any]) -> str:
+    epoch_history = _load_epoch_history(model_type, metrics)
+    if not epoch_history:
+        return "<p class='muted'>No saved epoch history is available for graph rendering.</p>"
+
+    charts = [
+        _render_line_chart(
+            epoch_history,
+            "Loss Across Epochs",
+            [("Train Loss", "train_loss", "#8a3d2f"), ("Validation Loss", "val_loss", "#3a6b48")],
+        ),
+        _render_line_chart(
+            epoch_history,
+            "Accuracy Across Epochs",
+            [("Train Accuracy", "train_acc", "#255f85"), ("Validation Accuracy", "val_acc", "#5e8c31"), ("Best Val Accuracy", "best_val_acc", "#d08b2b")],
+        ),
+        _render_line_chart(
+            epoch_history,
+            "Learning Rate Schedule",
+            [("Learning Rate", "lr", "#7b4ec9")],
+        ),
+    ]
+    return f"<div class='chart-grid'>{''.join(charts)}</div>"
 
 
 def _render_top_confusions(test_summary: dict[str, Any] | None) -> str:
@@ -503,6 +654,28 @@ def _render_model_doc_section(model_type: str) -> str:
             ("Image Size", "image_size"),
         ],
     )
+    technical_rows = _render_definition_rows(
+        metrics,
+        [
+            ("Device", "device"),
+            ("Batch Size", "batch_size"),
+            ("Epochs", "epochs"),
+            ("Learning Rate", "learning_rate"),
+            ("Weight Decay", "weight_decay"),
+            ("Seed", "seed"),
+            ("YOLO Base Weights", "yolo_weights"),
+        ],
+    )
+    augmentation_rows = _render_definition_rows(
+        metrics.get("augmentation", {}) if isinstance(metrics.get("augmentation"), dict) else {},
+        [
+            ("Validation Augmented", "augment_validation"),
+            ("Noise Std", "noise_std"),
+            ("Blur Probability", "blur_prob"),
+            ("Erase Probability", "erase_prob"),
+            ("Rotation Degrees", "rotation_degrees"),
+        ],
+    )
 
     return f"""
     <section class="model-section">
@@ -526,10 +699,22 @@ def _render_model_doc_section(model_type: str) -> str:
           <h3>Android / Deployment Metadata</h3>
           <table><tbody>{android_rows}</tbody></table>
         </article>
+        <article class="card">
+          <h3>Training Configuration</h3>
+          <table><tbody>{technical_rows}</tbody></table>
+        </article>
+        <article class="card">
+          <h3>Augmentation and Robustness Settings</h3>
+          <table><tbody>{augmentation_rows}</tbody></table>
+        </article>
       </div>
       <article class="card">
+        <h3>Training Curves</h3>
+        { _render_training_graphs(model_type, metrics) }
+      </article>
+      <article class="card">
         <h3>Training and Validation History</h3>
-        { _render_epoch_history_table(model_type) }
+        { _render_epoch_history_table(model_type, metrics) }
       </article>
       <article class="card">
         <h3>Per-Class Performance</h3>
@@ -649,6 +834,45 @@ def _build_technical_documentation_html() -> str:
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 16px;
+    }}
+    .chart-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px;
+    }}
+    .chart-card {{
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fffdf8;
+      padding: 14px;
+    }}
+    .chart-card h4 {{
+      margin: 0 0 10px;
+      font-size: 1rem;
+    }}
+    .chart-card svg {{
+      width: 100%;
+      height: auto;
+      display: block;
+    }}
+    .legend {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }}
+    .legend-item {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }}
+    .legend-swatch {{
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      display: inline-block;
     }}
     .visual-card {{
       margin: 0;
@@ -836,6 +1060,11 @@ def _run_training_job(request: TrainingRequest) -> None:
             image_size=request.image_size,
             workers=request.workers,
             seed=request.seed,
+            augment_validation=request.augment_validation,
+            noise_std=request.noise_std,
+            blur_prob=request.blur_prob,
+            erase_prob=request.erase_prob,
+            rotation_degrees=request.rotation_degrees,
             label_mode=request.label_mode,
             preprocess_device=request.preprocess_device,
             preprocess_workers=request.preprocess_workers,

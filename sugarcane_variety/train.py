@@ -21,6 +21,10 @@ from torchvision.models import ResNet18_Weights
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 DEFAULT_ONNX_OPSETS = (16, 17)
+DEFAULT_TRAIN_NOISE_STD = 0.04
+DEFAULT_TRAIN_BLUR_PROB = 0.20
+DEFAULT_TRAIN_ERASE_PROB = 0.20
+DEFAULT_TRAIN_ROTATION_DEGREES = 12.0
 ModelType = Literal["resnet18", "yolov8"]
 ProgressCallback = Callable[[Dict[str, Any]], None]
 
@@ -206,11 +210,56 @@ def _apply_gpu_color_jitter(image: torch.Tensor) -> torch.Tensor:
     return image
 
 
+def _apply_random_rotation(image: torch.Tensor, max_degrees: float) -> torch.Tensor:
+    if max_degrees <= 0:
+        return image
+    angle = random.uniform(-max_degrees, max_degrees)
+    return TF.rotate(
+        image,
+        angle=angle,
+        interpolation=transforms.InterpolationMode.BILINEAR,
+    )
+
+
+def _apply_gaussian_noise(image: torch.Tensor, noise_std: float) -> torch.Tensor:
+    if noise_std <= 0:
+        return image
+    noise = torch.randn_like(image).mul_(noise_std)
+    return image.add(noise).clamp_(0.0, 1.0)
+
+
+def _apply_random_blur(image: torch.Tensor, blur_prob: float) -> torch.Tensor:
+    if blur_prob <= 0 or random.random() >= blur_prob:
+        return image
+    kernel_size = random.choice([3, 5])
+    sigma = random.uniform(0.2, 1.4)
+    return TF.gaussian_blur(image, kernel_size=[kernel_size, kernel_size], sigma=[sigma, sigma])
+
+
+def _apply_random_erasing(image: torch.Tensor, erase_prob: float) -> torch.Tensor:
+    if erase_prob <= 0 or random.random() >= erase_prob:
+        return image
+
+    _, height, width = image.shape
+    erase_h = random.randint(max(1, height // 12), max(1, height // 4))
+    erase_w = random.randint(max(1, width // 12), max(1, width // 4))
+    top = random.randint(0, max(height - erase_h, 0))
+    left = random.randint(0, max(width - erase_w, 0))
+    fill_value = random.uniform(0.0, 1.0)
+    image[:, top : top + erase_h, left : left + erase_w] = fill_value
+    return image
+
+
 def _prepare_images_on_device(
     images: list[torch.Tensor],
     device: torch.device,
     image_size: int,
     training: bool,
+    augment_validation: bool = False,
+    noise_std: float = DEFAULT_TRAIN_NOISE_STD,
+    blur_prob: float = DEFAULT_TRAIN_BLUR_PROB,
+    erase_prob: float = DEFAULT_TRAIN_ERASE_PROB,
+    rotation_degrees: float = DEFAULT_TRAIN_ROTATION_DEGREES,
 ) -> torch.Tensor:
     processed: list[torch.Tensor] = []
     for image in images:
@@ -225,10 +274,18 @@ def _prepare_images_on_device(
             image = _resize_tensor(image, (image_size, image_size))
             if random.random() < 0.5:
                 image = torch.flip(image, dims=[2])
+            image = _apply_random_rotation(image, rotation_degrees)
             image = _apply_gpu_color_jitter(image)
+            image = _apply_random_blur(image, blur_prob)
+            image = _apply_gaussian_noise(image, noise_std)
+            image = _apply_random_erasing(image, erase_prob)
         else:
             image = _resize_shorter_edge(image, int(image_size * 1.15))
             image = _center_crop_tensor(image, image_size)
+            if augment_validation:
+                image = _apply_random_rotation(image, rotation_degrees * 0.5)
+                image = _apply_random_blur(image, blur_prob * 0.5)
+                image = _apply_gaussian_noise(image, noise_std * 0.5)
 
         processed.append(image)
 
@@ -396,6 +453,10 @@ def _eval_epoch(
     device: torch.device,
     criterion: nn.Module,
     image_size: int,
+    augment_validation: bool = False,
+    noise_std: float = DEFAULT_TRAIN_NOISE_STD,
+    blur_prob: float = DEFAULT_TRAIN_BLUR_PROB,
+    rotation_degrees: float = DEFAULT_TRAIN_ROTATION_DEGREES,
 ) -> Tuple[float, float]:
     model.eval()
     losses = []
@@ -406,6 +467,10 @@ def _eval_epoch(
             device=device,
             image_size=image_size,
             training=False,
+            augment_validation=augment_validation,
+            noise_std=noise_std,
+            blur_prob=blur_prob,
+            rotation_degrees=rotation_degrees,
         )
         labels = labels.to(device, non_blocking=True)
         logits = model(images)
@@ -425,6 +490,11 @@ def _run_resnet18_training(
     image_size: int = 224,
     workers: int = 4,
     seed: int = 42,
+    augment_validation: bool = False,
+    noise_std: float = DEFAULT_TRAIN_NOISE_STD,
+    blur_prob: float = DEFAULT_TRAIN_BLUR_PROB,
+    erase_prob: float = DEFAULT_TRAIN_ERASE_PROB,
+    rotation_degrees: float = DEFAULT_TRAIN_ROTATION_DEGREES,
     progress_callback: ProgressCallback | None = None,
 ) -> TrainSummary:
     _set_seed(seed)
@@ -453,6 +523,7 @@ def _run_resnet18_training(
 
     best_val_acc = -1.0
     best_ckpt = out_dir / "best_model.pt"
+    epoch_history: List[Dict[str, object]] = []
     if progress_callback is not None:
         progress_callback(
             {
@@ -462,6 +533,13 @@ def _run_resnet18_training(
                 "classes": classes,
                 "output_dir": str(out_dir),
                 "device": str(device),
+                "augmentation": {
+                    "augment_validation": augment_validation,
+                    "noise_std": noise_std,
+                    "blur_prob": blur_prob,
+                    "erase_prob": erase_prob,
+                    "rotation_degrees": rotation_degrees,
+                },
             }
         )
 
@@ -476,6 +554,10 @@ def _run_resnet18_training(
                 device=device,
                 image_size=image_size,
                 training=True,
+                noise_std=noise_std,
+                blur_prob=blur_prob,
+                erase_prob=erase_prob,
+                rotation_degrees=rotation_degrees,
             )
             labels = labels.to(device, non_blocking=True)
 
@@ -492,7 +574,29 @@ def _run_resnet18_training(
 
         train_loss = float(np.mean(batch_losses))
         train_acc = float(np.mean(batch_accs))
-        val_loss, val_acc = _eval_epoch(model, val_dl, device, criterion, image_size)
+        current_lr = float(scheduler.get_last_lr()[0])
+        val_loss, val_acc = _eval_epoch(
+            model,
+            val_dl,
+            device,
+            criterion,
+            image_size,
+            augment_validation=augment_validation,
+            noise_std=noise_std,
+            blur_prob=blur_prob,
+            rotation_degrees=rotation_degrees,
+        )
+        epoch_record = {
+            "epoch": epoch,
+            "epochs": epochs,
+            "train_loss": train_loss,
+            "train_acc": train_acc,
+            "val_loss": val_loss,
+            "val_acc": val_acc,
+            "best_val_acc": best_val_acc if best_val_acc > val_acc else val_acc,
+            "lr": current_lr,
+        }
+        epoch_history.append(epoch_record)
 
         print(
             f"Epoch {epoch:02d}/{epochs} "
@@ -516,20 +620,24 @@ def _run_resnet18_training(
                 {
                     "event": "epoch_completed",
                     "model_type": "resnet18",
-                    "epoch": epoch,
-                    "epochs": epochs,
-                    "train_loss": train_loss,
-                    "train_acc": train_acc,
-                    "val_loss": val_loss,
-                    "val_acc": val_acc,
-                    "best_val_acc": best_val_acc,
                     "checkpoint_path": str(best_ckpt),
+                    **epoch_record,
                 }
             )
 
     checkpoint = torch.load(best_ckpt, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
-    test_loss, test_acc = _eval_epoch(model, test_dl, device, criterion, image_size)
+    test_loss, test_acc = _eval_epoch(
+        model,
+        test_dl,
+        device,
+        criterion,
+        image_size,
+        augment_validation=augment_validation,
+        noise_std=noise_std,
+        blur_prob=blur_prob,
+        rotation_degrees=rotation_degrees,
+    )
     print(f"Final test | loss={test_loss:.4f} acc={test_acc:.4f}")
     android_artifact_path, onnx_artifact_path = _export_resnet18_android_artifacts(
         model=model,
@@ -559,6 +667,14 @@ def _run_resnet18_training(
         "image_size": image_size,
         "seed": seed,
         "device": str(device),
+        "augmentation": {
+            "augment_validation": augment_validation,
+            "noise_std": noise_std,
+            "blur_prob": blur_prob,
+            "erase_prob": erase_prob,
+            "rotation_degrees": rotation_degrees,
+        },
+        "epoch_history": epoch_history,
         "android_artifact_path": android_artifact_path,
         "onnx_artifact_path": onnx_artifact_path,
         "android_metadata_path": android_metadata_path,
@@ -622,6 +738,7 @@ def _run_yolov8_training(
         raise ValueError("Need at least 2 classes to train a classifier.")
 
     model = YOLO(yolo_weights)
+    epoch_history: List[Dict[str, object]] = []
     if progress_callback is not None:
         progress_callback(
             {
@@ -637,13 +754,25 @@ def _run_yolov8_training(
         def _on_yolo_epoch_end(trainer: object) -> None:
             epoch = int(getattr(trainer, "epoch", -1)) + 1
             metrics = getattr(trainer, "metrics", {}) or {}
+            optimizer = getattr(trainer, "optimizer", None)
+            current_lr = None
+            if optimizer is not None:
+                try:
+                    current_lr = float(optimizer.param_groups[0].get("lr"))
+                except Exception:
+                    current_lr = None
+            epoch_record = {
+                "epoch": epoch,
+                "epochs": epochs,
+                "lr": current_lr,
+                "metrics": _json_safe(metrics),
+            }
+            epoch_history.append(epoch_record)
             progress_callback(
                 {
                     "event": "epoch_completed",
                     "model_type": "yolov8",
-                    "epoch": epoch,
-                    "epochs": epochs,
-                    "metrics": _json_safe(metrics),
+                    **epoch_record,
                 }
             )
 
@@ -731,6 +860,7 @@ def _run_yolov8_training(
         "image_size": image_size,
         "seed": seed,
         "yolo_weights": yolo_weights,
+        "epoch_history": epoch_history,
         "onnx_artifact_path": onnx_artifact_path,
         "android_metadata_path": android_metadata_path,
     }
@@ -813,6 +943,11 @@ def run_training(
     image_size: int = 224,
     workers: int = 4,
     seed: int = 42,
+    augment_validation: bool = False,
+    noise_std: float = DEFAULT_TRAIN_NOISE_STD,
+    blur_prob: float = DEFAULT_TRAIN_BLUR_PROB,
+    erase_prob: float = DEFAULT_TRAIN_ERASE_PROB,
+    rotation_degrees: float = DEFAULT_TRAIN_ROTATION_DEGREES,
     model_type: ModelType = "resnet18",
     yolo_weights: str = "yolov8n-cls.pt",
     progress_callback: ProgressCallback | None = None,
@@ -828,6 +963,11 @@ def run_training(
             image_size=image_size,
             workers=workers,
             seed=seed,
+            augment_validation=augment_validation,
+            noise_std=noise_std,
+            blur_prob=blur_prob,
+            erase_prob=erase_prob,
+            rotation_degrees=rotation_degrees,
             progress_callback=progress_callback,
         )
     if model_type == "yolov8":

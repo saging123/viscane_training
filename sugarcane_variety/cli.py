@@ -99,6 +99,35 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
     train.add_argument("--seed", type=int, default=42, help="Random seed.")
     train.add_argument(
+        "--augment-validation",
+        action="store_true",
+        help="Apply lighter noise/blur/rotation to validation and test data too.",
+    )
+    train.add_argument(
+        "--noise-std",
+        type=float,
+        default=0.04,
+        help="Gaussian noise strength for ResNet training images.",
+    )
+    train.add_argument(
+        "--blur-prob",
+        type=float,
+        default=0.20,
+        help="Probability of Gaussian blur for ResNet training images.",
+    )
+    train.add_argument(
+        "--erase-prob",
+        type=float,
+        default=0.20,
+        help="Probability of random erasing for ResNet training images.",
+    )
+    train.add_argument(
+        "--rotation-degrees",
+        type=float,
+        default=12.0,
+        help="Maximum random rotation in degrees for ResNet training images.",
+    )
+    train.add_argument(
         "--model-type",
         choices=["resnet18", "yolov8"],
         default="resnet18",
@@ -155,6 +184,35 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument("--image-size", type=int, default=224, help="Input size.")
     all_cmd.add_argument("--workers", type=int, default=4, help="DataLoader workers.")
     all_cmd.add_argument("--seed", type=int, default=42, help="Random seed.")
+    all_cmd.add_argument(
+        "--augment-validation",
+        action="store_true",
+        help="Apply lighter noise/blur/rotation to validation and test data too.",
+    )
+    all_cmd.add_argument(
+        "--noise-std",
+        type=float,
+        default=0.04,
+        help="Gaussian noise strength for ResNet training images.",
+    )
+    all_cmd.add_argument(
+        "--blur-prob",
+        type=float,
+        default=0.20,
+        help="Probability of Gaussian blur for ResNet training images.",
+    )
+    all_cmd.add_argument(
+        "--erase-prob",
+        type=float,
+        default=0.20,
+        help="Probability of random erasing for ResNet training images.",
+    )
+    all_cmd.add_argument(
+        "--rotation-degrees",
+        type=float,
+        default=12.0,
+        help="Maximum random rotation in degrees for ResNet training images.",
+    )
     all_cmd.add_argument(
         "--model-type",
         choices=["resnet18", "yolov8"],
@@ -243,6 +301,11 @@ def main() -> None:
             image_size=args.image_size,
             workers=args.workers,
             seed=args.seed,
+            augment_validation=args.augment_validation,
+            noise_std=args.noise_std,
+            blur_prob=args.blur_prob,
+            erase_prob=args.erase_prob,
+            rotation_degrees=args.rotation_degrees,
             model_type=args.model_type,
             yolo_weights=args.yolo_weights,
         )
@@ -322,6 +385,11 @@ def main() -> None:
             image_size=args.image_size,
             workers=args.workers,
             seed=args.seed,
+            augment_validation=args.augment_validation,
+            noise_std=args.noise_std,
+            blur_prob=args.blur_prob,
+            erase_prob=args.erase_prob,
+            rotation_degrees=args.rotation_degrees,
             model_type=args.model_type,
             yolo_weights=args.yolo_weights,
         )
