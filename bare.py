@@ -21,8 +21,8 @@ REPORT_PATH = BASE_ARTIFACTS_DIR / "diagnostic_training_report.json"
 
 # T4-friendly defaults: larger batch uses VRAM better; 4 workers avoids CPU contention.
 BATCH_SIZE = 64
-WORKERS = 4
-PREPROCESS_WORKERS = 4
+WORKERS = 8
+PREPROCESS_WORKERS = 7
 EPOCHS = 35
 IMAGE_SIZE = 224
 LR = 5e-4
