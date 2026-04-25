@@ -31,6 +31,8 @@ DEFAULT_TRAIN_NOISE_STD = 0.07
 DEFAULT_TRAIN_BLUR_PROB = 0.30
 DEFAULT_TRAIN_ERASE_PROB = 0.30
 DEFAULT_TRAIN_ROTATION_DEGREES = 18.0
+DEFAULT_LABEL_SMOOTHING = 0.0
+DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
 ModelType = Literal["resnet18", "yolov8"]
 ProgressCallback = Callable[[Dict[str, Any]], None]
 
@@ -352,6 +354,12 @@ def _build_resnet18(num_classes: int, pretrained: bool) -> nn.Module:
     return model
 
 
+def _set_resnet_backbone_trainable(model: nn.Module, trainable: bool) -> None:
+    for name, parameter in model.named_parameters():
+        if not name.startswith("fc."):
+            parameter.requires_grad = trainable
+
+
 def _get_onnx_export_opsets() -> tuple[int, ...]:
     raw_value = os.getenv("ONNX_EXPORT_OPSETS", "")
     if not raw_value.strip():
@@ -534,6 +542,8 @@ def _run_resnet18_training(
     early_stopping_patience: int = DEFAULT_EARLY_STOPPING_PATIENCE,
     early_stopping_min_delta: float = DEFAULT_EARLY_STOPPING_MIN_DELTA,
     use_class_weights: bool = True,
+    label_smoothing: float = DEFAULT_LABEL_SMOOTHING,
+    freeze_backbone_epochs: int = DEFAULT_FREEZE_BACKBONE_EPOCHS,
     progress_callback: ProgressCallback | None = None,
 ) -> TrainSummary:
     _set_seed(seed)
@@ -554,12 +564,17 @@ def _run_resnet18_training(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = _build_resnet18(num_classes=len(classes), pretrained=True)
+    if freeze_backbone_epochs > 0:
+        _set_resnet_backbone_trainable(model, False)
     model.to(device)
 
     class_weights = None
     if use_class_weights:
         class_weights = _compute_class_weights(train_dl.dataset, len(classes), device=device)
-    train_criterion = nn.CrossEntropyLoss(weight=class_weights)
+    train_criterion = nn.CrossEntropyLoss(
+        weight=class_weights,
+        label_smoothing=max(0.0, min(float(label_smoothing), 0.4)),
+    )
     eval_criterion = nn.CrossEntropyLoss()
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs, 1))
@@ -591,11 +606,25 @@ def _run_resnet18_training(
                     "early_stopping_patience": early_stopping_patience,
                     "early_stopping_min_delta": early_stopping_min_delta,
                     "use_class_weights": use_class_weights,
+                    "label_smoothing": label_smoothing,
+                    "freeze_backbone_epochs": freeze_backbone_epochs,
                 },
             }
         )
 
     for epoch in range(1, epochs + 1):
+        if freeze_backbone_epochs > 0 and epoch == freeze_backbone_epochs + 1:
+            _set_resnet_backbone_trainable(model, True)
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "event": "backbone_unfrozen",
+                        "model_type": "resnet18",
+                        "epoch": epoch,
+                        "freeze_backbone_epochs": freeze_backbone_epochs,
+                    }
+                )
+
         model.train()
         batch_losses = []
         batch_accs = []
@@ -753,6 +782,8 @@ def _run_resnet18_training(
             "early_stopping_patience": early_stopping_patience,
             "early_stopping_min_delta": early_stopping_min_delta,
             "use_class_weights": use_class_weights,
+            "label_smoothing": label_smoothing,
+            "freeze_backbone_epochs": freeze_backbone_epochs,
         },
         "augmentation": {
             "augment_validation": augment_validation,
@@ -1068,6 +1099,8 @@ def run_training(
     early_stopping_patience: int = DEFAULT_EARLY_STOPPING_PATIENCE,
     early_stopping_min_delta: float = DEFAULT_EARLY_STOPPING_MIN_DELTA,
     use_class_weights: bool = True,
+    label_smoothing: float = DEFAULT_LABEL_SMOOTHING,
+    freeze_backbone_epochs: int = DEFAULT_FREEZE_BACKBONE_EPOCHS,
     model_type: ModelType = "resnet18",
     yolo_weights: str = "yolov8n-cls.pt",
     progress_callback: ProgressCallback | None = None,
@@ -1091,6 +1124,8 @@ def run_training(
             early_stopping_patience=early_stopping_patience,
             early_stopping_min_delta=early_stopping_min_delta,
             use_class_weights=use_class_weights,
+            label_smoothing=label_smoothing,
+            freeze_backbone_epochs=freeze_backbone_epochs,
             progress_callback=progress_callback,
         )
     if model_type == "yolov8":

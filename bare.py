@@ -29,8 +29,10 @@ PREPROCESS_WORKERS = 8
 EPOCHS = 45
 PREPROCESS_RESIZE = 384
 IMAGE_SIZE = 320
-LR = 5e-4
-WEIGHT_DECAY = 5e-4
+LR = 2e-4
+WEIGHT_DECAY = 1e-3
+LABEL_SMOOTHING = 0.10
+FREEZE_BACKBONE_EPOCHS = 4
 LABEL_MODE = "variety_maturity"
 MODEL_TYPES = ("resnet18",)
 YOLO_WEIGHTS = "yolov8n-cls.pt"
@@ -139,6 +141,8 @@ def _run_model_training(
         early_stopping_patience=8,
         early_stopping_min_delta=0.002,
         use_class_weights=True,
+        label_smoothing=LABEL_SMOOTHING,
+        freeze_backbone_epochs=FREEZE_BACKBONE_EPOCHS,
         label_mode=LABEL_MODE,
         preprocess_device="cpu",
         preprocess_workers=PREPROCESS_WORKERS,
@@ -180,6 +184,11 @@ def _run_model_training(
             "blur_prob": BLUR_PROB,
             "erase_prob": ERASE_PROB,
             "rotation_degrees": ROTATION_DEGREES,
+        },
+        "regularization": {
+            "label_smoothing": LABEL_SMOOTHING,
+            "freeze_backbone_epochs": FREEZE_BACKBONE_EPOCHS,
+            "weight_decay": WEIGHT_DECAY,
         },
         "preprocess": prep,
         "split_analysis": split_analysis,
@@ -294,6 +303,8 @@ def main() -> None:
             "image_size": IMAGE_SIZE,
             "lr": LR,
             "weight_decay": WEIGHT_DECAY,
+            "label_smoothing": LABEL_SMOOTHING,
+            "freeze_backbone_epochs": FREEZE_BACKBONE_EPOCHS,
             "noise_std": NOISE_STD,
             "blur_prob": BLUR_PROB,
             "erase_prob": ERASE_PROB,
@@ -309,7 +320,6 @@ def main() -> None:
     print(f"Best model: {result['model_type']}")
     print(f"Best checkpoint: {result['train'].checkpoint_path}")
     print(f"API ResNet checkpoint: {BASE_ARTIFACTS_DIR / 'resnet18' / 'best_model.pt'}")
-    print(f"API YOLO checkpoint: {BASE_ARTIFACTS_DIR / 'yolov8' / 'yolov8' / 'weights' / 'best.pt'}")
     print("Findings:")
     for finding in report.get("findings", []):
         print(f"- {finding}")

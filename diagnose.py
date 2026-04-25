@@ -21,12 +21,14 @@ BASE_ARTIFACTS_DIR = Path("content/data/sugarcane_artifacts")
 REPORT_PATH = BASE_ARTIFACTS_DIR / "diagnostic_training_report.json"
 
 # T4-friendly defaults for 8 vCPU + T4.
-BATCH_SIZE = 64
-WORKERS = 4
-PREPROCESS_WORKERS = 4
+BATCH_SIZE = 32
+WORKERS = 8
+PREPROCESS_WORKERS = 8
 EPOCHS = 35
 LR = 5e-4
 WEIGHT_DECAY = 5e-4
+LABEL_SMOOTHING = 0.0
+FREEZE_BACKBONE_EPOCHS = 0
 
 EXPERIMENTS = [
     {
@@ -54,6 +56,20 @@ EXPERIMENTS = [
         "label_mode": "variety_maturity",
         "resize": 384,
         "image_size": 320,
+        "noise_std": 0.02,
+        "blur_prob": 0.05,
+        "erase_prob": 0.05,
+        "rotation_degrees": 8.0,
+    },
+    {
+        "name": "resnet18_joint_regularized_320",
+        "label_mode": "variety_maturity",
+        "resize": 384,
+        "image_size": 320,
+        "lr": 2e-4,
+        "weight_decay": 1e-3,
+        "label_smoothing": 0.10,
+        "freeze_backbone_epochs": 4,
         "noise_std": 0.02,
         "blur_prob": 0.05,
         "erase_prob": 0.05,
@@ -154,6 +170,10 @@ def _run_resnet_experiment(
     blur_prob: float,
     erase_prob: float,
     rotation_degrees: float,
+    lr: float = LR,
+    weight_decay: float = WEIGHT_DECAY,
+    label_smoothing: float = LABEL_SMOOTHING,
+    freeze_backbone_epochs: int = FREEZE_BACKBONE_EPOCHS,
 ) -> dict[str, Any]:
     prepared_dir = str(BASE_PREPARED_DIR / f"prepared_{name}")
     output_dir = str(BASE_ARTIFACTS_DIR / name)
@@ -166,8 +186,8 @@ def _run_resnet_experiment(
         resize=resize,
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
-        lr=LR,
-        weight_decay=WEIGHT_DECAY,
+        lr=lr,
+        weight_decay=weight_decay,
         image_size=image_size,
         workers=WORKERS,
         seed=42,
@@ -178,6 +198,8 @@ def _run_resnet_experiment(
         early_stopping_patience=8,
         early_stopping_min_delta=0.002,
         use_class_weights=True,
+        label_smoothing=label_smoothing,
+        freeze_backbone_epochs=freeze_backbone_epochs,
         label_mode=label_mode,
         preprocess_device="cpu",
         preprocess_workers=PREPROCESS_WORKERS,
@@ -220,6 +242,12 @@ def _run_resnet_experiment(
             "erase_prob": erase_prob,
             "rotation_degrees": rotation_degrees,
         },
+        "regularization": {
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "label_smoothing": label_smoothing,
+            "freeze_backbone_epochs": freeze_backbone_epochs,
+        },
         "preprocess": prep,
         "split_analysis": split_analysis,
         "split_audit": split_audit,
@@ -236,9 +264,24 @@ def _add_findings(report: dict[str, Any]) -> None:
     by_name = {item["name"]: item for item in experiments}
     findings: list[str] = []
 
+    if experiments:
+        best = max(experiments, key=lambda item: float(item["evaluation"].test_acc))
+        report["best_experiment"] = {
+            "name": best["name"],
+            "test_acc": best["evaluation"].test_acc,
+            "variety_acc": best["evaluation"].variety_acc,
+            "maturity_acc": best["evaluation"].maturity_acc,
+            "checkpoint_path": best["train"].checkpoint_path,
+            "output_dir": best["output_dir"],
+        }
+        findings.append(
+            f"Best diagnostic experiment is {best['name']} at exact acc={float(best['evaluation'].test_acc):.4f}; checkpoint={best['train'].checkpoint_path}."
+        )
+
     maturity = by_name.get("resnet18_maturity_low_aug_320")
     joint_low_aug_224 = by_name.get("resnet18_joint_low_aug_224")
     joint_low_aug_320 = by_name.get("resnet18_joint_low_aug_320")
+    joint_regularized_320 = by_name.get("resnet18_joint_regularized_320")
     joint_full_context = by_name.get("resnet18_joint_full_context_320")
 
     if maturity:
@@ -280,6 +323,22 @@ def _add_findings(report: dict[str, Any]) -> None:
                 "Full-context and square-preprocessed runs are close; focus next on labels and low-sample classes."
             )
 
+    if joint_low_aug_320 and joint_regularized_320:
+        baseline_acc = float(joint_low_aug_320["evaluation"].test_acc)
+        regularized_acc = float(joint_regularized_320["evaluation"].test_acc)
+        if regularized_acc > baseline_acc + 0.02:
+            findings.append(
+                "Regularized 320px fine-tuning helped; keep label smoothing and frozen-backbone warmup in bare.py."
+            )
+        elif baseline_acc > regularized_acc + 0.02:
+            findings.append(
+                "Regularized 320px fine-tuning hurt accuracy; remove label smoothing/freeze warmup from bare.py."
+            )
+        else:
+            findings.append(
+                "Regularized and baseline 320px runs are close; use top confusions to decide whether label smoothing improves maturity recall."
+            )
+
     for item in experiments:
         audit = item["split_audit"]
         if audit.cross_split_exact_groups > 0:
@@ -308,6 +367,8 @@ def main() -> None:
             "epochs": EPOCHS,
             "lr": LR,
             "weight_decay": WEIGHT_DECAY,
+            "label_smoothing": LABEL_SMOOTHING,
+            "freeze_backbone_epochs": FREEZE_BACKBONE_EPOCHS,
         },
         "experiments": [],
         "events": [],
