@@ -20,22 +20,24 @@ BASE_ARTIFACTS_DIR = Path("content/data/sugarcane_artifacts")
 RESNET_OUTPUT_DIR = str(BASE_ARTIFACTS_DIR / "resnet18")
 YOLO_OUTPUT_DIR = str(BASE_ARTIFACTS_DIR / "yolov8")
 REPORT_PATH = BASE_ARTIFACTS_DIR / "full_training_report.json"
+RUN_VERSION = "full-train-resnet18-lowaug-320-v2"
 
 # T4-friendly defaults for 8 vCPU + T4.
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 WORKERS = 8
 PREPROCESS_WORKERS = 8
-EPOCHS = 35
-IMAGE_SIZE = 224
+EPOCHS = 45
+PREPROCESS_RESIZE = 384
+IMAGE_SIZE = 320
 LR = 5e-4
 WEIGHT_DECAY = 5e-4
 LABEL_MODE = "variety_maturity"
-MODEL_TYPES = ("resnet18", "yolov8")
+MODEL_TYPES = ("resnet18",)
 YOLO_WEIGHTS = "yolov8n-cls.pt"
-NOISE_STD = 0.07
-BLUR_PROB = 0.30
-ERASE_PROB = 0.30
-ROTATION_DEGREES = 18.0
+NOISE_STD = 0.02
+BLUR_PROB = 0.05
+ERASE_PROB = 0.05
+ROTATION_DEGREES = 8.0
 
 
 def _json_safe(value: Any) -> Any:
@@ -108,6 +110,7 @@ def _run_model_training(
         raw_dir=RAW_DIR,
         prepared_dir=PREPARED_DIR,
         output_dir=output_dir,
+        resize=PREPROCESS_RESIZE,
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
         lr=LR,
@@ -256,10 +259,12 @@ def _add_findings(report: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    print(f"bare.py run version: {RUN_VERSION}")
     report: dict[str, Any] = {
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "raw_dir": RAW_DIR,
         "settings": {
+            "run_version": RUN_VERSION,
             "label_mode": LABEL_MODE,
             "model_types": list(MODEL_TYPES),
             "yolo_weights": YOLO_WEIGHTS,
@@ -272,6 +277,7 @@ def main() -> None:
             "workers": WORKERS,
             "preprocess_workers": PREPROCESS_WORKERS,
             "epochs": EPOCHS,
+            "preprocess_resize": PREPROCESS_RESIZE,
             "image_size": IMAGE_SIZE,
             "lr": LR,
             "weight_decay": WEIGHT_DECAY,

@@ -18,13 +18,13 @@ RAW_DIR = "content/data/raw/DATASETSFINAL"
 BASE_PREPARED_DIR = Path("content/data")
 BASE_ARTIFACTS_DIR = Path("content/data/sugarcane_artifacts")
 REPORT_PATH = BASE_ARTIFACTS_DIR / "diagnostic_training_report.json"
+RUN_VERSION = "targeted-diagnostics-lowaug-resolution-context-v2"
 
-# T4-friendly defaults: larger batch uses VRAM better; 8 workers keeps input loading busy.
-BATCH_SIZE = 64
+# T4-friendly defaults for 8 vCPU + T4.
+BATCH_SIZE = 32
 WORKERS = 8
-PREPROCESS_WORKERS = 7
+PREPROCESS_WORKERS = 8
 EPOCHS = 35
-IMAGE_SIZE = 224
 LR = 5e-4
 WEIGHT_DECAY = 5e-4
 
@@ -83,6 +83,8 @@ def _run_resnet_experiment(
     report: dict[str, Any],
     name: str,
     label_mode: str,
+    resize: int | None,
+    image_size: int,
     noise_std: float,
     blur_prob: float,
     erase_prob: float,
@@ -96,11 +98,12 @@ def _run_resnet_experiment(
         raw_dir=RAW_DIR,
         prepared_dir=prepared_dir,
         output_dir=output_dir,
+        resize=resize,
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
         lr=LR,
         weight_decay=WEIGHT_DECAY,
-        image_size=IMAGE_SIZE,
+        image_size=image_size,
         workers=WORKERS,
         seed=42,
         noise_std=noise_std,
@@ -145,6 +148,8 @@ def _run_resnet_experiment(
         "prepared_dir": prepared_dir,
         "output_dir": output_dir,
         "augmentation": {
+            "resize": resize,
+            "image_size": image_size,
             "noise_std": noise_std,
             "blur_prob": blur_prob,
             "erase_prob": erase_prob,
@@ -166,41 +171,48 @@ def _add_findings(report: dict[str, Any]) -> None:
     by_name = {item["name"]: item for item in experiments}
     findings: list[str] = []
 
-    variety = by_name.get("resnet18_variety")
-    maturity = by_name.get("resnet18_maturity")
-    joint = by_name.get("resnet18_joint")
-    joint_low_aug = by_name.get("resnet18_joint_low_aug")
+    maturity = by_name.get("resnet18_maturity_low_aug_320")
+    joint_low_aug_224 = by_name.get("resnet18_joint_low_aug_224")
+    joint_low_aug_320 = by_name.get("resnet18_joint_low_aug_320")
+    joint_full_context = by_name.get("resnet18_joint_full_context_320")
 
-    if variety and maturity:
-        variety_acc = float(variety["evaluation"].test_acc)
+    if maturity:
         maturity_acc = float(maturity["evaluation"].test_acc)
-        if variety_acc > maturity_acc + 0.10:
+        if maturity_acc < 0.60:
             findings.append(
-                "Maturity is likely the main bottleneck: variety-only accuracy is much higher than maturity-only accuracy."
-            )
-        elif maturity_acc > variety_acc + 0.10:
-            findings.append(
-                "Variety separation is likely the main bottleneck: maturity-only accuracy is much higher than variety-only accuracy."
-            )
-        else:
-            findings.append(
-                "Variety and maturity have similar difficulty; inspect labels, image quality, and split leakage for both tasks."
+                "Maturity remains the main bottleneck after label cleanup; prioritize maturity label review and more balanced maturity samples."
             )
 
-    if joint and joint_low_aug:
-        joint_acc = float(joint["evaluation"].test_acc)
-        low_aug_acc = float(joint_low_aug["evaluation"].test_acc)
-        if low_aug_acc > joint_acc + 0.03:
+    if joint_low_aug_224 and joint_low_aug_320:
+        acc_224 = float(joint_low_aug_224["evaluation"].test_acc)
+        acc_320 = float(joint_low_aug_320["evaluation"].test_acc)
+        if acc_320 > acc_224 + 0.02:
             findings.append(
-                "Over-augmentation is likely hurting accuracy: the low-augmentation joint run performed better."
+                "Higher resolution helped; keep 320px training / 384px preprocessing in bare.py."
             )
-        elif joint_acc > low_aug_acc + 0.03:
+        elif acc_224 > acc_320 + 0.02:
             findings.append(
-                "The default augmentation is probably helping: the normal joint run performed better than low augmentation."
+                "Higher resolution did not help; keep the smaller 224px recipe to avoid overfitting."
             )
         else:
             findings.append(
-                "Augmentation strength is probably not the primary issue: normal and low-augmentation joint runs are close."
+                "224px and 320px are close; choose based on speed unless per-class maturity recall improves at 320px."
+            )
+
+    if joint_low_aug_320 and joint_full_context:
+        cropped_acc = float(joint_low_aug_320["evaluation"].test_acc)
+        full_context_acc = float(joint_full_context["evaluation"].test_acc)
+        if full_context_acc > cropped_acc + 0.02:
+            findings.append(
+                "Full image context helped; avoid square preprocessing crops for final training."
+            )
+        elif cropped_acc > full_context_acc + 0.02:
+            findings.append(
+                "Square preprocessing performed better than full-context originals; keep the 384px prepared images."
+            )
+        else:
+            findings.append(
+                "Full-context and square-preprocessed runs are close; focus next on labels and low-sample classes."
             )
 
     for item in experiments:
@@ -220,15 +232,16 @@ def _add_findings(report: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    print(f"diagnose.py run version: {RUN_VERSION}")
     report: dict[str, Any] = {
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "raw_dir": RAW_DIR,
         "settings": {
+            "run_version": RUN_VERSION,
             "batch_size": BATCH_SIZE,
             "workers": WORKERS,
             "preprocess_workers": PREPROCESS_WORKERS,
             "epochs": EPOCHS,
-            "image_size": IMAGE_SIZE,
             "lr": LR,
             "weight_decay": WEIGHT_DECAY,
         },
@@ -239,35 +252,43 @@ def main() -> None:
 
     _run_resnet_experiment(
         report=report,
-        name="resnet18_variety",
-        label_mode="variety",
-        noise_std=0.07,
-        blur_prob=0.30,
-        erase_prob=0.30,
-        rotation_degrees=18.0,
-    )
-    _run_resnet_experiment(
-        report=report,
-        name="resnet18_maturity",
+        name="resnet18_maturity_low_aug_320",
         label_mode="maturity",
-        noise_std=0.07,
-        blur_prob=0.30,
-        erase_prob=0.30,
-        rotation_degrees=18.0,
+        resize=384,
+        image_size=320,
+        noise_std=0.02,
+        blur_prob=0.05,
+        erase_prob=0.05,
+        rotation_degrees=8.0,
     )
     _run_resnet_experiment(
         report=report,
-        name="resnet18_joint",
+        name="resnet18_joint_low_aug_224",
         label_mode="variety_maturity",
-        noise_std=0.07,
-        blur_prob=0.30,
-        erase_prob=0.30,
-        rotation_degrees=18.0,
+        resize=256,
+        image_size=224,
+        noise_std=0.02,
+        blur_prob=0.05,
+        erase_prob=0.05,
+        rotation_degrees=8.0,
     )
     _run_resnet_experiment(
         report=report,
-        name="resnet18_joint_low_aug",
+        name="resnet18_joint_low_aug_320",
         label_mode="variety_maturity",
+        resize=384,
+        image_size=320,
+        noise_std=0.02,
+        blur_prob=0.05,
+        erase_prob=0.05,
+        rotation_degrees=8.0,
+    )
+    _run_resnet_experiment(
+        report=report,
+        name="resnet18_joint_full_context_320",
+        label_mode="variety_maturity",
+        resize=None,
+        image_size=320,
         noise_std=0.02,
         blur_prob=0.05,
         erase_prob=0.05,

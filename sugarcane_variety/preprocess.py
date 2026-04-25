@@ -69,6 +69,10 @@ def _is_image_file(path: Path) -> bool:
     return path.suffix.lower() in VALID_EXTENSIONS
 
 
+def _normalize_label_component(label: str) -> str:
+    return re.sub(r"\s+", "_", label.strip())
+
+
 def _average_hash(path: Path, hash_size: int = 8) -> str:
     with Image.open(path) as img:
         img = img.convert("L").resize((hash_size, hash_size), Image.Resampling.BILINEAR)
@@ -85,11 +89,12 @@ def _hamming_distance(hash_a: str, hash_b: str) -> int:
 def _collect_images(raw_dir: Path) -> Dict[str, List[Path]]:
     class_to_images: Dict[str, List[Path]] = {}
     for class_dir in sorted(p for p in raw_dir.iterdir() if p.is_dir()):
+        class_name = _normalize_label_component(class_dir.name)
         images = sorted(
             [p for p in class_dir.rglob("*") if p.is_file() and _is_image_file(p)]
         )
         if images:
-            class_to_images[class_dir.name] = images
+            class_to_images.setdefault(class_name, []).extend(images)
     if not class_to_images:
         raise ValueError(
             f"No class folders with images found in '{raw_dir}'. "
@@ -101,6 +106,7 @@ def _collect_images(raw_dir: Path) -> Dict[str, List[Path]]:
 def _collect_images_variety(raw_dir: Path) -> Dict[str, List[Path]]:
     class_to_images: Dict[str, List[Path]] = {}
     for variety_dir in sorted(p for p in raw_dir.iterdir() if p.is_dir()):
+        variety_name = _normalize_label_component(variety_dir.name)
         nested_maturity_dirs = [p for p in variety_dir.iterdir() if p.is_dir()]
         if nested_maturity_dirs:
             images = sorted(
@@ -116,7 +122,7 @@ def _collect_images_variety(raw_dir: Path) -> Dict[str, List[Path]]:
                 [p for p in variety_dir.rglob("*") if p.is_file() and _is_image_file(p)]
             )
         if images:
-            class_to_images[variety_dir.name] = images
+            class_to_images.setdefault(variety_name, []).extend(images)
     if not class_to_images:
         raise ValueError(
             f"No images found in '{raw_dir}'. "
@@ -129,13 +135,15 @@ def _collect_images_variety(raw_dir: Path) -> Dict[str, List[Path]]:
 def _collect_images_variety_maturity(raw_dir: Path) -> Dict[str, List[Path]]:
     class_to_images: Dict[str, List[Path]] = {}
     for variety_dir in sorted(p for p in raw_dir.iterdir() if p.is_dir()):
+        variety_name = _normalize_label_component(variety_dir.name)
         for maturity_dir in sorted(p for p in variety_dir.iterdir() if p.is_dir()):
+            maturity_name = _normalize_label_component(maturity_dir.name)
             images = sorted(
                 [p for p in maturity_dir.rglob("*") if p.is_file() and _is_image_file(p)]
             )
             if images:
-                class_name = f"{variety_dir.name}__{maturity_dir.name}"
-                class_to_images[class_name] = images
+                class_name = f"{variety_name}__{maturity_name}"
+                class_to_images.setdefault(class_name, []).extend(images)
     if not class_to_images:
         raise ValueError(
             f"No images found in '{raw_dir}'. "
@@ -148,11 +156,12 @@ def _collect_images_maturity(raw_dir: Path) -> Dict[str, List[Path]]:
     class_to_images: Dict[str, List[Path]] = {}
     for variety_dir in sorted(p for p in raw_dir.iterdir() if p.is_dir()):
         for maturity_dir in sorted(p for p in variety_dir.iterdir() if p.is_dir()):
+            maturity_name = _normalize_label_component(maturity_dir.name)
             images = sorted(
                 [p for p in maturity_dir.rglob("*") if p.is_file() and _is_image_file(p)]
             )
             if images:
-                class_to_images.setdefault(maturity_dir.name, []).extend(images)
+                class_to_images.setdefault(maturity_name, []).extend(images)
     class_to_images = {
         class_name: sorted(paths) for class_name, paths in sorted(class_to_images.items())
     }
