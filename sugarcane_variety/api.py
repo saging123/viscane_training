@@ -120,6 +120,24 @@ def _checkpoint_path() -> Path:
     return _model_checkpoint_path("resnet18")
 
 
+def _best_model_type_from_training_report() -> str | None:
+    report_path = _artifacts_dir() / "full_training_report.json"
+    if not report_path.exists():
+        return None
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    best_result = report.get("best_result")
+    if not isinstance(best_result, dict):
+        return None
+    model_type = str(best_result.get("model_type", ""))
+    if model_type not in SUPPORTED_MODELS:
+        return None
+    return model_type
+
+
 def _active_checkpoint_path() -> Path:
     if loaded_models.get(loaded_model_type) is not None:
         return model_checkpoints.get(loaded_model_type, _model_checkpoint_path(loaded_model_type))
@@ -1351,6 +1369,8 @@ def _load_model(
     checkpoint_path: Path | None = None,
     model_type: str | None = None,
 ) -> None:
+    global loaded_model_type
+
     requested_model_type = model_type
     if checkpoint_path is None and requested_model_type is not None:
         checkpoint_path = _model_checkpoint_path(requested_model_type)
@@ -1424,7 +1444,10 @@ def startup() -> None:
             loaded_models[model_type] = None
             model_classes[model_type] = []
             model_load_errors[model_type] = f"{type(exc).__name__}: {exc}"
-    if loaded_models.get("resnet18") is not None:
+    preferred_model_type = _best_model_type_from_training_report()
+    if preferred_model_type and loaded_models.get(preferred_model_type) is not None:
+        loaded_model_type = preferred_model_type
+    elif loaded_models.get("resnet18") is not None:
         loaded_model_type = "resnet18"
     elif loaded_models.get("yolov8") is not None:
         loaded_model_type = "yolov8"
