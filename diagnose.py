@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
+import shutil
 import time
 from typing import Any
 
@@ -18,7 +19,6 @@ RAW_DIR = "content/data/raw/DATASETSFINAL"
 BASE_PREPARED_DIR = Path("content/data")
 BASE_ARTIFACTS_DIR = Path("content/data/sugarcane_artifacts")
 REPORT_PATH = BASE_ARTIFACTS_DIR / "diagnostic_training_report.json"
-RUN_VERSION = "targeted-diagnostics-lowaug-resolution-context-v2"
 
 # T4-friendly defaults for 8 vCPU + T4.
 BATCH_SIZE = 32
@@ -27,6 +27,56 @@ PREPROCESS_WORKERS = 8
 EPOCHS = 35
 LR = 5e-4
 WEIGHT_DECAY = 5e-4
+
+EXPERIMENTS = [
+    {
+        "name": "resnet18_maturity_low_aug_320",
+        "label_mode": "maturity",
+        "resize": 384,
+        "image_size": 320,
+        "noise_std": 0.02,
+        "blur_prob": 0.05,
+        "erase_prob": 0.05,
+        "rotation_degrees": 8.0,
+    },
+    {
+        "name": "resnet18_joint_low_aug_224",
+        "label_mode": "variety_maturity",
+        "resize": 256,
+        "image_size": 224,
+        "noise_std": 0.02,
+        "blur_prob": 0.05,
+        "erase_prob": 0.05,
+        "rotation_degrees": 8.0,
+    },
+    {
+        "name": "resnet18_joint_low_aug_320",
+        "label_mode": "variety_maturity",
+        "resize": 384,
+        "image_size": 320,
+        "noise_std": 0.02,
+        "blur_prob": 0.05,
+        "erase_prob": 0.05,
+        "rotation_degrees": 8.0,
+    },
+    {
+        "name": "resnet18_joint_full_context_320",
+        "label_mode": "variety_maturity",
+        "resize": None,
+        "image_size": 320,
+        "noise_std": 0.02,
+        "blur_prob": 0.05,
+        "erase_prob": 0.05,
+        "rotation_degrees": 8.0,
+    },
+]
+
+LEGACY_EXPERIMENT_NAMES = [
+    "resnet18_variety",
+    "resnet18_maturity",
+    "resnet18_joint",
+    "resnet18_joint_low_aug",
+]
 
 
 def _json_safe(value: Any) -> Any:
@@ -51,6 +101,21 @@ def _json_safe(value: Any) -> Any:
 def _write_report(report: dict[str, Any]) -> None:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(_json_safe(report), indent=2), encoding="utf-8")
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _clean_previous_outputs() -> None:
+    experiment_names = [str(item["name"]) for item in EXPERIMENTS] + LEGACY_EXPERIMENT_NAMES
+    for name in experiment_names:
+        _remove_path(BASE_PREPARED_DIR / f"prepared_{name}")
+        _remove_path(BASE_ARTIFACTS_DIR / name)
+    _remove_path(REPORT_PATH)
 
 
 def _make_progress_callback(report: dict[str, Any], experiment_name: str):
@@ -232,12 +297,11 @@ def _add_findings(report: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    print(f"diagnose.py run version: {RUN_VERSION}")
+    _clean_previous_outputs()
     report: dict[str, Any] = {
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "raw_dir": RAW_DIR,
         "settings": {
-            "run_version": RUN_VERSION,
             "batch_size": BATCH_SIZE,
             "workers": WORKERS,
             "preprocess_workers": PREPROCESS_WORKERS,
@@ -250,50 +314,8 @@ def main() -> None:
     }
     _write_report(report)
 
-    _run_resnet_experiment(
-        report=report,
-        name="resnet18_maturity_low_aug_320",
-        label_mode="maturity",
-        resize=384,
-        image_size=320,
-        noise_std=0.02,
-        blur_prob=0.05,
-        erase_prob=0.05,
-        rotation_degrees=8.0,
-    )
-    _run_resnet_experiment(
-        report=report,
-        name="resnet18_joint_low_aug_224",
-        label_mode="variety_maturity",
-        resize=256,
-        image_size=224,
-        noise_std=0.02,
-        blur_prob=0.05,
-        erase_prob=0.05,
-        rotation_degrees=8.0,
-    )
-    _run_resnet_experiment(
-        report=report,
-        name="resnet18_joint_low_aug_320",
-        label_mode="variety_maturity",
-        resize=384,
-        image_size=320,
-        noise_std=0.02,
-        blur_prob=0.05,
-        erase_prob=0.05,
-        rotation_degrees=8.0,
-    )
-    _run_resnet_experiment(
-        report=report,
-        name="resnet18_joint_full_context_320",
-        label_mode="variety_maturity",
-        resize=None,
-        image_size=320,
-        noise_std=0.02,
-        blur_prob=0.05,
-        erase_prob=0.05,
-        rotation_degrees=8.0,
-    )
+    for experiment in EXPERIMENTS:
+        _run_resnet_experiment(report=report, **experiment)
 
     _add_findings(report)
     print(f"\nDiagnostic report saved to: {REPORT_PATH}")

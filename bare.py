@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
+import shutil
 import time
 from typing import Any
 
@@ -20,7 +21,6 @@ BASE_ARTIFACTS_DIR = Path("content/data/sugarcane_artifacts")
 RESNET_OUTPUT_DIR = str(BASE_ARTIFACTS_DIR / "resnet18")
 YOLO_OUTPUT_DIR = str(BASE_ARTIFACTS_DIR / "yolov8")
 REPORT_PATH = BASE_ARTIFACTS_DIR / "full_training_report.json"
-RUN_VERSION = "full-train-resnet18-lowaug-320-v2"
 
 # T4-friendly defaults for 8 vCPU + T4.
 BATCH_SIZE = 32
@@ -62,6 +62,20 @@ def _json_safe(value: Any) -> Any:
 def _write_report(report: dict[str, Any]) -> None:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(_json_safe(report), indent=2), encoding="utf-8")
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _clean_previous_outputs() -> None:
+    _remove_path(Path(PREPARED_DIR))
+    _remove_path(Path(RESNET_OUTPUT_DIR))
+    _remove_path(Path(YOLO_OUTPUT_DIR))
+    _remove_path(REPORT_PATH)
 
 
 def _make_progress_callback(report: dict[str, Any], run_name: str):
@@ -259,12 +273,11 @@ def _add_findings(report: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    print(f"bare.py run version: {RUN_VERSION}")
+    _clean_previous_outputs()
     report: dict[str, Any] = {
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "raw_dir": RAW_DIR,
         "settings": {
-            "run_version": RUN_VERSION,
             "label_mode": LABEL_MODE,
             "model_types": list(MODEL_TYPES),
             "yolo_weights": YOLO_WEIGHTS,
