@@ -21,9 +21,9 @@ BASE_ARTIFACTS_DIR = Path("content/data/sugarcane_artifacts")
 REPORT_PATH = BASE_ARTIFACTS_DIR / "diagnostic_training_report.json"
 
 # T4-friendly defaults for 8 vCPU + T4.
-BATCH_SIZE = 32
-WORKERS = 7
-PREPROCESS_WORKERS = 7
+BATCH_SIZE = 64
+WORKERS = 5
+PREPROCESS_WORKERS = 4
 EPOCHS = 35
 LR = 5e-4
 WEIGHT_DECAY = 5e-4
