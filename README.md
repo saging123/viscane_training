@@ -231,6 +231,24 @@ After training, start the API from the project root:
 uvicorn sugarcane_variety.api:app --host 0.0.0.0 --port 8000
 ```
 
+To keep the API running in the background after you close the terminal:
+
+```bash
+nohup uvicorn sugarcane_variety.api:app --host 0.0.0.0 --port 8000 > uvicorn.log 2>&1 &
+```
+
+Check the server log:
+
+```bash
+tail -f uvicorn.log
+```
+
+Stop the background server:
+
+```bash
+pkill -f "uvicorn sugarcane_variety.api:app"
+```
+
 By default, the API loads:
 
 ```text

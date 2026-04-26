@@ -34,7 +34,7 @@ WEIGHT_DECAY = 1e-3
 LABEL_SMOOTHING = 0.10
 FREEZE_BACKBONE_EPOCHS = 4
 LABEL_MODE = "variety_maturity"
-MODEL_TYPES = ("resnet18",)
+MODEL_TYPES = ("resnet18", "yolov8")
 YOLO_WEIGHTS = "yolov8n-cls.pt"
 NOISE_STD = 0.02
 BLUR_PROB = 0.05
@@ -320,6 +320,7 @@ def main() -> None:
     print(f"Best model: {result['model_type']}")
     print(f"Best checkpoint: {result['train'].checkpoint_path}")
     print(f"API ResNet checkpoint: {BASE_ARTIFACTS_DIR / 'resnet18' / 'best_model.pt'}")
+    print(f"API YOLO checkpoint: {BASE_ARTIFACTS_DIR / 'yolov8' / 'yolov8' / 'weights' / 'best.pt'}")
     print("Findings:")
     for finding in report.get("findings", []):
         print(f"- {finding}")
