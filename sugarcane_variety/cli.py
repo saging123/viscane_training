@@ -8,7 +8,14 @@ from sugarcane_variety.preprocess import (
     run_preprocess,
     run_preprocess_flat,
 )
-from sugarcane_variety.train import run_evaluation, run_training
+from sugarcane_variety.train import (
+    DEFAULT_TRAIN_BLUR_PROB,
+    DEFAULT_TRAIN_ERASE_PROB,
+    DEFAULT_TRAIN_NOISE_STD,
+    DEFAULT_TRAIN_ROTATION_DEGREES,
+    run_evaluation,
+    run_training,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -147,25 +154,25 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--noise-std",
         type=float,
-        default=0.07,
+        default=DEFAULT_TRAIN_NOISE_STD,
         help="Gaussian noise strength for ResNet training images.",
     )
     train.add_argument(
         "--blur-prob",
         type=float,
-        default=0.30,
+        default=DEFAULT_TRAIN_BLUR_PROB,
         help="Probability of Gaussian blur for ResNet training images.",
     )
     train.add_argument(
         "--erase-prob",
         type=float,
-        default=0.30,
+        default=DEFAULT_TRAIN_ERASE_PROB,
         help="Probability of random erasing for ResNet training images.",
     )
     train.add_argument(
         "--rotation-degrees",
         type=float,
-        default=18.0,
+        default=DEFAULT_TRAIN_ROTATION_DEGREES,
         help="Maximum random rotation in degrees for ResNet training images.",
     )
     train.add_argument(
@@ -250,25 +257,25 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument(
         "--noise-std",
         type=float,
-        default=0.07,
+        default=DEFAULT_TRAIN_NOISE_STD,
         help="Gaussian noise strength for ResNet training images.",
     )
     all_cmd.add_argument(
         "--blur-prob",
         type=float,
-        default=0.30,
+        default=DEFAULT_TRAIN_BLUR_PROB,
         help="Probability of Gaussian blur for ResNet training images.",
     )
     all_cmd.add_argument(
         "--erase-prob",
         type=float,
-        default=0.30,
+        default=DEFAULT_TRAIN_ERASE_PROB,
         help="Probability of random erasing for ResNet training images.",
     )
     all_cmd.add_argument(
         "--rotation-degrees",
         type=float,
-        default=18.0,
+        default=DEFAULT_TRAIN_ROTATION_DEGREES,
         help="Maximum random rotation in degrees for ResNet training images.",
     )
     all_cmd.add_argument(

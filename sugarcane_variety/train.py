@@ -27,10 +27,21 @@ DEFAULT_TRAIN_LR = 5e-4
 DEFAULT_TRAIN_WEIGHT_DECAY = 5e-4
 DEFAULT_EARLY_STOPPING_PATIENCE = 8
 DEFAULT_EARLY_STOPPING_MIN_DELTA = 0.002
-DEFAULT_TRAIN_NOISE_STD = 0.07
-DEFAULT_TRAIN_BLUR_PROB = 0.30
-DEFAULT_TRAIN_ERASE_PROB = 0.30
-DEFAULT_TRAIN_ROTATION_DEGREES = 18.0
+DEFAULT_TRAIN_NOISE_STD = 0.02
+DEFAULT_TRAIN_BLUR_PROB = 0.05
+DEFAULT_TRAIN_ERASE_PROB = 0.05
+DEFAULT_TRAIN_ROTATION_DEGREES = 8.0
+DEFAULT_YOLO_AUGMENTATION = {
+    "degrees": 8.0,
+    "translate": 0.06,
+    "scale": 0.15,
+    "fliplr": 0.35,
+    "flipud": 0.0,
+    "hsv_h": 0.01,
+    "hsv_s": 0.35,
+    "hsv_v": 0.25,
+    "erasing": 0.10,
+}
 DEFAULT_LABEL_SMOOTHING = 0.0
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
 ModelType = Literal["resnet18", "yolov8"]
@@ -924,15 +935,7 @@ def _run_yolov8_training(
         project=str(out_dir),
         name="yolov8",
         exist_ok=True,
-        degrees=18.0,
-        translate=0.12,
-        scale=0.25,
-        fliplr=0.5,
-        flipud=0.12,
-        hsv_h=0.02,
-        hsv_s=0.75,
-        hsv_v=0.45,
-        erasing=0.35,
+        **DEFAULT_YOLO_AUGMENTATION,
     )
 
     save_dir = Path(getattr(train_result, "save_dir", out_dir / "yolov8"))
@@ -997,17 +1000,7 @@ def _run_yolov8_training(
         "training_controls": {
             "early_stopping_patience": early_stopping_patience,
         },
-        "augmentation": {
-            "degrees": 18.0,
-            "translate": 0.12,
-            "scale": 0.25,
-            "fliplr": 0.5,
-            "flipud": 0.12,
-            "hsv_h": 0.02,
-            "hsv_s": 0.75,
-            "hsv_v": 0.45,
-            "erasing": 0.35,
-        },
+        "augmentation": dict(DEFAULT_YOLO_AUGMENTATION),
         "epoch_history": epoch_history,
         "onnx_artifact_path": onnx_artifact_path,
         "android_metadata_path": android_metadata_path,

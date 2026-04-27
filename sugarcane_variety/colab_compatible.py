@@ -5,8 +5,22 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from sugarcane_variety.preprocess import PreprocessSummary, run_preprocess
-from sugarcane_variety.train import EvalSummary, TrainSummary, run_evaluation, run_training
+from sugarcane_variety.preprocess import (
+    PreparedDatasetAnalysisSummary,
+    PreprocessSummary,
+    analyze_prepared_dataset,
+    run_preprocess,
+)
+from sugarcane_variety.train import (
+    DEFAULT_TRAIN_BLUR_PROB,
+    DEFAULT_TRAIN_ERASE_PROB,
+    DEFAULT_TRAIN_NOISE_STD,
+    DEFAULT_TRAIN_ROTATION_DEGREES,
+    EvalSummary,
+    TrainSummary,
+    run_evaluation,
+    run_training,
+)
 
 
 def install_requirements(requirements_path: str = "requirements.txt") -> None:
@@ -62,10 +76,10 @@ def train_for_colab(
     workers: int = 8,
     seed: int = 42,
     augment_validation: bool = False,
-    noise_std: float = 0.07,
-    blur_prob: float = 0.30,
-    erase_prob: float = 0.30,
-    rotation_degrees: float = 18.0,
+    noise_std: float = DEFAULT_TRAIN_NOISE_STD,
+    blur_prob: float = DEFAULT_TRAIN_BLUR_PROB,
+    erase_prob: float = DEFAULT_TRAIN_ERASE_PROB,
+    rotation_degrees: float = DEFAULT_TRAIN_ROTATION_DEGREES,
     early_stopping_patience: int = 8,
     early_stopping_min_delta: float = 0.002,
     use_class_weights: bool = True,
@@ -145,6 +159,24 @@ def print_eval_summary(summary: EvalSummary) -> None:
             )
 
 
+def _dataset_analysis_payload(
+    summary: PreparedDatasetAnalysisSummary,
+) -> dict[str, Any]:
+    return {
+        "prepared_dir": summary.prepared_dir,
+        "total_images": summary.total_images,
+        "split_counts": summary.split_counts,
+        "class_counts_by_split": summary.class_counts_by_split,
+        "overall_class_counts": summary.overall_class_counts,
+        "class_distribution_ratio": summary.class_distribution_ratio,
+        "low_sample_threshold": summary.low_sample_threshold,
+        "low_sample_warnings": summary.low_sample_warnings,
+        "variety_counts_by_split": summary.variety_counts_by_split,
+        "maturity_counts_by_split": summary.maturity_counts_by_split,
+        "summary_json_path": summary.summary_json_path,
+    }
+
+
 def run_all_for_colab(
     raw_dir: str,
     prepared_dir: str = "/content/data/prepared",
@@ -160,10 +192,10 @@ def run_all_for_colab(
     workers: int = 8,
     seed: int = 42,
     augment_validation: bool = False,
-    noise_std: float = 0.07,
-    blur_prob: float = 0.30,
-    erase_prob: float = 0.30,
-    rotation_degrees: float = 18.0,
+    noise_std: float = DEFAULT_TRAIN_NOISE_STD,
+    blur_prob: float = DEFAULT_TRAIN_BLUR_PROB,
+    erase_prob: float = DEFAULT_TRAIN_ERASE_PROB,
+    rotation_degrees: float = DEFAULT_TRAIN_ROTATION_DEGREES,
     early_stopping_patience: int = 8,
     early_stopping_min_delta: float = 0.002,
     use_class_weights: bool = True,
@@ -192,6 +224,20 @@ def run_all_for_colab(
             label_mode=label_mode,
             preprocess_device=preprocess_device,
             preprocess_workers=preprocess_workers,
+        )
+
+    dataset_analysis = analyze_prepared_dataset(
+        prepared_dir=prepared_dir,
+        low_sample_threshold=20,
+    )
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "dataset_analyzed",
+                "model_type": model_type,
+                "label_mode": label_mode,
+                "dataset_summary": _dataset_analysis_payload(dataset_analysis),
+            }
         )
 
     train_summary = train_for_colab(

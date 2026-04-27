@@ -22,6 +22,10 @@ from pydantic import BaseModel, Field
 from torchvision import transforms
 
 from sugarcane_variety.train import (
+    DEFAULT_TRAIN_BLUR_PROB,
+    DEFAULT_TRAIN_ERASE_PROB,
+    DEFAULT_TRAIN_NOISE_STD,
+    DEFAULT_TRAIN_ROTATION_DEGREES,
     _build_resnet18,
     _decode_class_name,
     _prepare_images_on_device,
@@ -31,10 +35,12 @@ from sugarcane_variety.colab_compatible import run_all_for_colab, test_for_colab
 
 
 DEFAULT_ARTIFACTS_DIR = "content/data/sugarcane_artifacts"
+DEFAULT_PREPARED_DIR = "content/data/prepared"
 DEFAULT_RESNET_CHECKPOINT_PATH = "content/data/sugarcane_artifacts/resnet18/best_model.pt"
 DEFAULT_YOLO_CHECKPOINT_PATH = "content/data/sugarcane_artifacts/yolov8/yolov8/weights/best.pt"
 ARTIFACT_EXTENSIONS = {".pt", ".ptl", ".onnx", ".json"}
 VISUAL_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+DATASET_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 SUPPORTED_MODELS = {"resnet18", "yolov8"}
 
 
@@ -77,10 +83,10 @@ class TrainingRequest(BaseModel):
     workers: int = Field(default=8, ge=0)
     seed: int = 42
     augment_validation: bool = False
-    noise_std: float = Field(default=0.07, ge=0.0)
-    blur_prob: float = Field(default=0.30, ge=0.0, le=1.0)
-    erase_prob: float = Field(default=0.30, ge=0.0, le=1.0)
-    rotation_degrees: float = Field(default=18.0, ge=0.0)
+    noise_std: float = Field(default=DEFAULT_TRAIN_NOISE_STD, ge=0.0)
+    blur_prob: float = Field(default=DEFAULT_TRAIN_BLUR_PROB, ge=0.0, le=1.0)
+    erase_prob: float = Field(default=DEFAULT_TRAIN_ERASE_PROB, ge=0.0, le=1.0)
+    rotation_degrees: float = Field(default=DEFAULT_TRAIN_ROTATION_DEGREES, ge=0.0)
     early_stopping_patience: int = Field(default=8, ge=0)
     early_stopping_min_delta: float = Field(default=0.002, ge=0.0)
     use_class_weights: bool = True
@@ -332,6 +338,16 @@ def _record_training_event(event: dict[str, Any]) -> None:
             epoch_history = current_training_report.setdefault("epoch_history", [])
             epoch_history.append(timestamped)
             del epoch_history[:-200]
+        if event.get("event") == "dataset_analyzed":
+            dataset_summary = event.get("dataset_summary")
+            if isinstance(dataset_summary, dict):
+                current_training_report["dataset_summary"] = dataset_summary
+                _set_training_status(
+                    dataset_summary=dataset_summary,
+                    dataset_split_counts=dataset_summary.get("split_counts"),
+                    dataset_total_images=dataset_summary.get("total_images"),
+                    dataset_analysis_path=dataset_summary.get("summary_json_path"),
+                )
 
 
 def _read_json_file(path: Path) -> dict[str, Any] | list[Any] | None:
@@ -347,6 +363,218 @@ def _find_report_file(artifacts_dir: Path, name: str) -> Path | None:
         return candidate
     matches = sorted(artifacts_dir.rglob(name))
     return matches[0] if matches else None
+
+
+def _prepared_dir() -> Path:
+    return Path(os.getenv("PREPARED_DIR", DEFAULT_PREPARED_DIR)).expanduser().resolve()
+
+
+def _full_training_report() -> dict[str, Any]:
+    report_path = _artifacts_dir() / "full_training_report.json"
+    payload = _read_json_file(report_path) if report_path.exists() else None
+    return payload if isinstance(payload, dict) else {}
+
+
+def _dataset_analysis_from_report(report: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    results = report.get("results")
+    if not isinstance(results, list):
+        return None
+
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        analysis = result.get("split_analysis")
+        if isinstance(analysis, dict) and analysis:
+            source = str(result.get("prepared_dir") or analysis.get("prepared_dir") or "full_training_report.json")
+            return analysis, f"embedded in full_training_report.json ({source})"
+    return None
+
+
+def _candidate_prepared_dirs(report: dict[str, Any]) -> list[Path]:
+    candidates: list[Path] = []
+
+    def add_candidate(value: Any) -> None:
+        if not value:
+            return
+        try:
+            path = Path(str(value)).expanduser().resolve()
+        except OSError:
+            return
+        if path not in candidates:
+            candidates.append(path)
+
+    with report_lock:
+        live_request = current_training_report.get("request")
+    if isinstance(live_request, dict):
+        add_candidate(live_request.get("prepared_dir"))
+
+    status_request = training_status.get("request")
+    if isinstance(status_request, dict):
+        add_candidate(status_request.get("prepared_dir"))
+
+    settings = report.get("settings")
+    if isinstance(settings, dict):
+        add_candidate(settings.get("prepared_dir"))
+
+    results = report.get("results")
+    if isinstance(results, list):
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            add_candidate(result.get("prepared_dir"))
+            split_analysis = result.get("split_analysis")
+            if isinstance(split_analysis, dict):
+                add_candidate(split_analysis.get("prepared_dir"))
+
+    add_candidate(os.getenv("PREPARED_DIR"))
+    add_candidate(DEFAULT_PREPARED_DIR)
+    return candidates
+
+
+def _count_dataset_images(class_dir: Path) -> int:
+    return sum(
+        1
+        for path in class_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in DATASET_IMAGE_EXTENSIONS
+    )
+
+
+def _analyze_prepared_dataset_directory(
+    prepared_dir: Path,
+    low_sample_threshold: int = 20,
+) -> dict[str, Any] | None:
+    if not prepared_dir.exists() or not prepared_dir.is_dir():
+        return None
+
+    split_names = ("train", "val", "test")
+    split_counts: dict[str, int] = {}
+    class_counts_by_split: dict[str, dict[str, int]] = {}
+    overall_class_counts: dict[str, int] = {}
+    variety_counts_by_split: dict[str, dict[str, int]] = {}
+    maturity_counts_by_split: dict[str, dict[str, int]] = {}
+
+    total_images = 0
+    for split_name in split_names:
+        split_dir = prepared_dir / split_name
+        split_class_counts: dict[str, int] = {}
+        split_variety_counts: dict[str, int] = {}
+        split_maturity_counts: dict[str, int] = {}
+        split_total = 0
+
+        if split_dir.exists() and split_dir.is_dir():
+            for class_dir in sorted(path for path in split_dir.iterdir() if path.is_dir()):
+                image_count = _count_dataset_images(class_dir)
+                if image_count <= 0:
+                    continue
+
+                class_name = class_dir.name
+                split_class_counts[class_name] = image_count
+                overall_class_counts[class_name] = overall_class_counts.get(class_name, 0) + image_count
+                split_total += image_count
+
+                if "__" in class_name:
+                    variety_name, maturity_name = class_name.split("__", 1)
+                    split_variety_counts[variety_name] = split_variety_counts.get(variety_name, 0) + image_count
+                    split_maturity_counts[maturity_name] = split_maturity_counts.get(maturity_name, 0) + image_count
+
+        split_counts[split_name] = split_total
+        class_counts_by_split[split_name] = split_class_counts
+        variety_counts_by_split[split_name] = split_variety_counts
+        maturity_counts_by_split[split_name] = split_maturity_counts
+        total_images += split_total
+
+    if total_images <= 0:
+        return None
+
+    class_count_values = list(overall_class_counts.values())
+    max_class_count = max(class_count_values) if class_count_values else 0
+    min_class_count = min(class_count_values) if class_count_values else 0
+    class_distribution_ratio = (
+        float(min_class_count) / float(max_class_count) if max_class_count > 0 else 0.0
+    )
+
+    low_sample_warnings: list[dict[str, Any]] = []
+    val_test_floor = max(1, low_sample_threshold // 3)
+    for class_name in sorted(overall_class_counts):
+        split_details = {
+            split_name: class_counts_by_split.get(split_name, {}).get(class_name, 0)
+            for split_name in split_names
+        }
+        total_for_class = overall_class_counts[class_name]
+        warning_reasons: list[str] = []
+        if split_details["train"] < low_sample_threshold:
+            warning_reasons.append("low_train_samples")
+        if split_details["val"] < val_test_floor:
+            warning_reasons.append("low_val_samples")
+        if split_details["test"] < val_test_floor:
+            warning_reasons.append("low_test_samples")
+        if total_for_class < (low_sample_threshold * 2):
+            warning_reasons.append("low_total_samples")
+        if warning_reasons:
+            low_sample_warnings.append(
+                {
+                    "class_name": class_name,
+                    "counts": split_details,
+                    "total": total_for_class,
+                    "reasons": warning_reasons,
+                }
+            )
+
+    return {
+        "prepared_dir": str(prepared_dir),
+        "total_images": total_images,
+        "split_counts": split_counts,
+        "class_counts_by_split": class_counts_by_split,
+        "overall_class_counts": overall_class_counts,
+        "class_distribution_ratio": class_distribution_ratio,
+        "low_sample_threshold": low_sample_threshold,
+        "low_sample_warnings": low_sample_warnings,
+        "variety_counts_by_split": variety_counts_by_split,
+        "maturity_counts_by_split": maturity_counts_by_split,
+        "computed_at_runtime": True,
+    }
+
+
+def _load_dataset_analysis() -> tuple[dict[str, Any], str, dict[str, Any]]:
+    report = _full_training_report()
+    with report_lock:
+        live_dataset_summary = current_training_report.get("dataset_summary")
+    if isinstance(live_dataset_summary, dict) and live_dataset_summary:
+        return live_dataset_summary, "current runtime training report", report
+
+    explicit_path = os.getenv("DATASET_ANALYSIS_PATH")
+    candidate_paths: list[Path] = []
+    if explicit_path:
+        candidate_paths.append(Path(explicit_path).expanduser().resolve())
+    candidate_paths.append(_prepared_dir() / "prepared_dataset_analysis.json")
+
+    artifact_match = _find_report_file(_artifacts_dir(), "prepared_dataset_analysis.json")
+    if artifact_match is not None:
+        candidate_paths.append(artifact_match)
+
+    seen: set[Path] = set()
+    for candidate in candidate_paths:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if not candidate.exists():
+            continue
+        payload = _read_json_file(candidate)
+        if isinstance(payload, dict):
+            return payload, str(candidate), report
+
+    from_report = _dataset_analysis_from_report(report)
+    if from_report is not None:
+        analysis, source = from_report
+        return analysis, source, report
+
+    for prepared_dir in _candidate_prepared_dirs(report):
+        analysis = _analyze_prepared_dataset_directory(prepared_dir)
+        if analysis is not None:
+            return analysis, f"computed from prepared dataset folder ({prepared_dir})", report
+
+    return {}, "", report
+
 
 
 def _normalize_metric_key(key: str) -> str:
@@ -439,6 +667,233 @@ def _render_definition_rows(data: dict[str, Any], keys: list[tuple[str, str]]) -
     if not rows:
         return "<tr><td colspan='2'>No metrics available.</td></tr>"
     return "".join(rows)
+
+
+def _split_class_label(class_name: str) -> tuple[str, str]:
+    decoded = _decode_class_name(class_name)
+    variety = decoded.get("variety") or "n/a"
+    maturity = decoded.get("maturity_status") or "n/a"
+    return variety, maturity
+
+
+def _format_count(value: Any) -> str:
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return "0"
+
+
+def _coerce_count(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _display_split_name(split_name: str) -> str:
+    return {
+        "train": "Training",
+        "val": "Validation",
+        "test": "Testing",
+    }.get(split_name, split_name)
+
+
+def _render_count_rows(
+    counts_by_split: dict[str, dict[str, Any]],
+    totals: dict[str, Any],
+) -> str:
+    if not totals:
+        return "<tr><td colspan='7'>No dataset count details are available.</td></tr>"
+
+    rows: list[str] = []
+    for class_name in sorted(totals):
+        variety, maturity = _split_class_label(class_name)
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(class_name)}</td>"
+            f"<td>{html.escape(variety)}</td>"
+            f"<td>{html.escape(maturity)}</td>"
+            f"<td>{html.escape(_format_count(counts_by_split.get('train', {}).get(class_name, 0)))}</td>"
+            f"<td>{html.escape(_format_count(counts_by_split.get('val', {}).get(class_name, 0)))}</td>"
+            f"<td>{html.escape(_format_count(counts_by_split.get('test', {}).get(class_name, 0)))}</td>"
+            f"<td>{html.escape(_format_count(totals.get(class_name, 0)))}</td>"
+            "</tr>"
+        )
+    return "".join(rows)
+
+
+def _render_rollup_rows(counts_by_split: dict[str, dict[str, Any]]) -> str:
+    labels = sorted(
+        {
+            label
+            for split_counts in counts_by_split.values()
+            if isinstance(split_counts, dict)
+            for label in split_counts
+        }
+    )
+    if not labels:
+        return "<tr><td colspan='5'>No rollup counts are available.</td></tr>"
+
+    rows: list[str] = []
+    for label in labels:
+        train = counts_by_split.get("train", {}).get(label, 0)
+        val = counts_by_split.get("val", {}).get(label, 0)
+        test = counts_by_split.get("test", {}).get(label, 0)
+        total = _coerce_count(train) + _coerce_count(val) + _coerce_count(test)
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(label))}</td>"
+            f"<td>{html.escape(_format_count(train))}</td>"
+            f"<td>{html.escape(_format_count(val))}</td>"
+            f"<td>{html.escape(_format_count(test))}</td>"
+            f"<td>{html.escape(_format_count(total))}</td>"
+            "</tr>"
+        )
+    return "".join(rows)
+
+
+def _render_low_sample_warnings(warnings: Any) -> str:
+    if not isinstance(warnings, list) or not warnings:
+        return "<p class='muted'>No low-sample warnings were recorded for the configured threshold.</p>"
+
+    rows: list[str] = []
+    for warning in warnings[:12]:
+        if not isinstance(warning, dict):
+            continue
+        counts = warning.get("counts") if isinstance(warning.get("counts"), dict) else {}
+        reasons = warning.get("reasons")
+        reason_text = ", ".join(str(item) for item in reasons) if isinstance(reasons, list) else str(reasons or "n/a")
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(warning.get('class_name', 'n/a')))}</td>"
+            f"<td>{html.escape(_format_count(counts.get('train', 0)))}</td>"
+            f"<td>{html.escape(_format_count(counts.get('val', 0)))}</td>"
+            f"<td>{html.escape(_format_count(counts.get('test', 0)))}</td>"
+            f"<td>{html.escape(_format_count(warning.get('total', 0)))}</td>"
+            f"<td>{html.escape(reason_text)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return "<p class='muted'>No low-sample warnings were recorded for the configured threshold.</p>"
+    return (
+        "<table><thead><tr><th>Class</th><th>Training</th><th>Validation</th><th>Testing</th><th>Total</th><th>Reason</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
+def _render_dataset_documentation_section() -> str:
+    analysis, source, report = _load_dataset_analysis()
+    settings = report.get("settings") if isinstance(report.get("settings"), dict) else {}
+
+    if not analysis:
+        expected_path = _prepared_dir() / "prepared_dataset_analysis.json"
+        return f"""
+        <article class="card">
+          <h2>Dataset and Image Summary</h2>
+          <p class="muted">
+            No prepared dataset analysis was found. Generate it with
+            <code>python main.py analyze-prepared --prepared-dir {html.escape(str(_prepared_dir()))}</code>
+            or place a JSON report at <code>{html.escape(str(expected_path))}</code>.
+          </p>
+        </article>
+        """
+
+    split_counts = analysis.get("split_counts") if isinstance(analysis.get("split_counts"), dict) else {}
+    class_counts_by_split = (
+        analysis.get("class_counts_by_split")
+        if isinstance(analysis.get("class_counts_by_split"), dict)
+        else {}
+    )
+    overall_class_counts = (
+        analysis.get("overall_class_counts")
+        if isinstance(analysis.get("overall_class_counts"), dict)
+        else {}
+    )
+    variety_counts_by_split = (
+        analysis.get("variety_counts_by_split")
+        if isinstance(analysis.get("variety_counts_by_split"), dict)
+        else {}
+    )
+    maturity_counts_by_split = (
+        analysis.get("maturity_counts_by_split")
+        if isinstance(analysis.get("maturity_counts_by_split"), dict)
+        else {}
+    )
+    low_sample_warnings = analysis.get("low_sample_warnings")
+
+    total_images = analysis.get("total_images")
+    prepared_dir = analysis.get("prepared_dir") or settings.get("prepared_dir") or str(_prepared_dir())
+    raw_dir = report.get("raw_dir") or "n/a"
+    label_mode = settings.get("label_mode") or "n/a"
+    preprocess_resize = settings.get("preprocess_resize")
+    image_size = settings.get("image_size")
+    class_count = len(overall_class_counts)
+    distribution_ratio = analysis.get("class_distribution_ratio")
+    distribution_text = _format_metric_value(distribution_ratio) if distribution_ratio is not None else "n/a"
+
+    split_summary_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(_display_split_name(split_name))}</td>"
+        f"<td>{html.escape(_format_count(count))}</td>"
+        "</tr>"
+        for split_name, count in split_counts.items()
+    ) or "<tr><td colspan='2'>No split counts are available.</td></tr>"
+
+    return f"""
+    <section class="dataset-section">
+      <div class="section-header">
+        <h2>Dataset and Image Summary</h2>
+      </div>
+      <p class="muted">
+        This section describes the prepared image dataset used for the documented training run.
+        Counts are loaded from {html.escape(source or 'the prepared dataset analysis report')}.
+      </p>
+      <div class="doc-grid">
+        <article class="card">
+          <h3>Dataset Configuration</h3>
+          <table><tbody>
+            <tr><th>Raw Directory</th><td>{html.escape(str(raw_dir))}</td></tr>
+            <tr><th>Prepared Directory</th><td>{html.escape(str(prepared_dir))}</td></tr>
+            <tr><th>Label Mode</th><td>{html.escape(str(label_mode))}</td></tr>
+            <tr><th>Total Images</th><td>{html.escape(_format_count(total_images))}</td></tr>
+            <tr><th>Class Count</th><td>{html.escape(_format_count(class_count))}</td></tr>
+            <tr><th>Class Balance Ratio</th><td>{html.escape(distribution_text)}</td></tr>
+            <tr><th>Preprocess Resize</th><td>{html.escape(_format_metric_value(preprocess_resize))}</td></tr>
+            <tr><th>Model Image Size</th><td>{html.escape(_format_metric_value(image_size))}</td></tr>
+          </tbody></table>
+        </article>
+        <article class="card">
+          <h3>Split Totals</h3>
+          <table><thead><tr><th>Dataset Section</th><th>Number of Images</th></tr></thead><tbody>{split_summary_rows}</tbody></table>
+        </article>
+      </div>
+      <article class="card">
+        <h3>Class Image Counts</h3>
+        <table>
+          <thead>
+            <tr><th>Class</th><th>Variety</th><th>Maturity</th><th>Training</th><th>Validation</th><th>Testing</th><th>Total</th></tr>
+          </thead>
+          <tbody>{_render_count_rows(class_counts_by_split, overall_class_counts)}</tbody>
+        </table>
+      </article>
+      <div class="doc-grid">
+        <article class="card">
+          <h3>Variety Rollup</h3>
+          <table><thead><tr><th>Variety</th><th>Training</th><th>Validation</th><th>Testing</th><th>Total</th></tr></thead>
+          <tbody>{_render_rollup_rows(variety_counts_by_split)}</tbody></table>
+        </article>
+        <article class="card">
+          <h3>Maturity Rollup</h3>
+          <table><thead><tr><th>Maturity</th><th>Training</th><th>Validation</th><th>Testing</th><th>Total</th></tr></thead>
+          <tbody>{_render_rollup_rows(maturity_counts_by_split)}</tbody></table>
+        </article>
+      </div>
+      <article class="card">
+        <h3>Low-Sample Warnings</h3>
+        {_render_low_sample_warnings(low_sample_warnings)}
+      </article>
+    </section>
+    """
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -1047,12 +1502,21 @@ def _build_technical_documentation_html() -> str:
     th {{ width: 32%; color: var(--muted); font-weight: 600; }}
     .comparison-table th, .comparison-table td {{ width: auto; }}
     .model-section {{ margin-top: 28px; }}
+    .dataset-section {{ margin-top: 24px; }}
     .section-header {{
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
       margin-bottom: 8px;
+    }}
+    code {{
+      background: #efe6d6;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 2px 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
     }}
     .status {{
       display: inline-flex;
@@ -1159,6 +1623,7 @@ def _build_technical_documentation_html() -> str:
           <tbody>{''.join(comparison_rows)}</tbody>
         </table>
       </article>
+      {_render_dataset_documentation_section()}
       {_render_comparison_graphs()}
     </section>
     {_render_model_doc_section("resnet18")}
@@ -1223,6 +1688,7 @@ def _build_current_report(artifacts_dir: Path | None = None) -> dict[str, Any]:
         selected_artifacts_dir = Path(str(live_report["artifacts_dir"])).expanduser().resolve()
     if selected_artifacts_dir is None:
         selected_artifacts_dir = _artifacts_dir()
+    dataset_analysis, dataset_source, _ = _load_dataset_analysis()
 
     return {
         "purpose": "Model comparison and research documentation",
@@ -1258,6 +1724,10 @@ def _build_current_report(artifacts_dir: Path | None = None) -> dict[str, Any]:
             "status": training_status,
             "live_report": live_report,
         },
+        "dataset": {
+            "source": dataset_source,
+            "analysis": dataset_analysis,
+        },
         "artifacts": {
             "dir": str(selected_artifacts_dir),
             "files": _artifact_file_index(selected_artifacts_dir),
@@ -1275,11 +1745,16 @@ def _run_training_job(request: TrainingRequest) -> None:
             artifacts_dir=request.output_dir,
             events=[],
             epoch_history=[],
+            dataset_summary={},
         )
         _set_training_status(
             state="running",
             message="Training is running.",
             request=request.dict(),
+            dataset_summary={},
+            dataset_split_counts=None,
+            dataset_total_images=None,
+            dataset_analysis_path=None,
         )
 
         prep_summary, train_summary = run_all_for_colab(
@@ -1330,12 +1805,20 @@ def _run_training_job(request: TrainingRequest) -> None:
             model_type=train_summary.model_type,
         )
 
+        with report_lock:
+            dataset_summary = current_training_report.get("dataset_summary")
+        dataset_summary = dataset_summary if isinstance(dataset_summary, dict) else {}
+
         _set_training_status(
             state="completed",
             message="Training completed. The API model was reloaded from the new checkpoint.",
             preprocess_summary=_summary_to_dict(prep_summary),
             train_summary=_summary_to_dict(train_summary),
             eval_summary=_summary_to_dict(eval_summary),
+            dataset_summary=dataset_summary,
+            dataset_split_counts=dataset_summary.get("split_counts"),
+            dataset_total_images=dataset_summary.get("total_images"),
+            dataset_analysis_path=dataset_summary.get("summary_json_path"),
             checkpoint_path=train_summary.checkpoint_path,
             model_type=train_summary.model_type,
             android_artifact_path=train_summary.android_artifact_path,
@@ -1347,6 +1830,7 @@ def _run_training_job(request: TrainingRequest) -> None:
             preprocess_summary=_summary_to_dict(prep_summary),
             train_summary=_summary_to_dict(train_summary),
             eval_summary=_summary_to_dict(eval_summary),
+            dataset_summary=dataset_summary,
             checkpoint_path=train_summary.checkpoint_path,
             artifacts_dir=request.output_dir,
         )
@@ -1617,6 +2101,10 @@ def start_training(
         state="queued",
         message="Training job was accepted and will start in the background.",
         request=request.dict(),
+        dataset_summary={},
+        dataset_split_counts=None,
+        dataset_total_images=None,
+        dataset_analysis_path=None,
     )
     background_tasks.add_task(_run_training_job, request)
     return {
