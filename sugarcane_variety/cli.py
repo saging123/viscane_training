@@ -201,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train.add_argument(
         "--model-type",
-        choices=["resnet18", "resnet18_two_head", "yolov8"],
+        choices=["resnet18", "yolov8"],
         default="resnet18",
         help="Model pipeline to train.",
     )
@@ -222,7 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument("--workers", type=int, default=8, help="DataLoader workers.")
     test.add_argument(
         "--model-type",
-        choices=["resnet18", "resnet18_two_head", "yolov8"],
+        choices=["resnet18", "yolov8"],
         default=None,
         help="Checkpoint model type. Auto-detected for ResNet18 checkpoints.",
     )
@@ -310,7 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     all_cmd.add_argument(
         "--model-type",
-        choices=["resnet18", "resnet18_two_head", "yolov8"],
+        choices=["resnet18", "yolov8"],
         default="resnet18",
         help="Model pipeline to train.",
     )

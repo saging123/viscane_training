@@ -494,6 +494,12 @@ def run_preprocess(
         raise FileNotFoundError(f"Raw dataset path does not exist: {raw_path}")
     if val_ratio < 0 or test_ratio < 0 or (val_ratio + test_ratio) >= 1:
         raise ValueError("Use ratios where val_ratio >= 0, test_ratio >= 0, and sum < 1.")
+    if (val_ratio + test_ratio) > 0.5:
+        raise ValueError(
+            "Use ratios that keep at least 50% of images for training. "
+            f"Received val_ratio={val_ratio} and test_ratio={test_ratio}, "
+            f"leaving only {1.0 - val_ratio - test_ratio:.2%} for training."
+        )
     if preprocess_workers < 1:
         raise ValueError("preprocess_workers must be at least 1.")
 

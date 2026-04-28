@@ -28,8 +28,6 @@ from sugarcane_variety.train import (
     DEFAULT_TRAIN_ROTATION_DEGREES,
     DEFAULT_USE_BALANCED_SAMPLER,
     _build_resnet18,
-    _build_resnet18_two_head,
-    _combine_two_head_logits,
     _decode_class_name,
     _prepare_images_on_device,
     _raise_ultralytics_dependency_error,
@@ -44,7 +42,7 @@ DEFAULT_YOLO_CHECKPOINT_PATH = "content/data/sugarcane_artifacts/yolov8/yolov8/w
 ARTIFACT_EXTENSIONS = {".pt", ".ptl", ".onnx", ".json"}
 VISUAL_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 DATASET_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
-SUPPORTED_MODELS = {"resnet18", "resnet18_two_head", "yolov8"}
+SUPPORTED_MODELS = {"resnet18", "yolov8"}
 REPORT_MODEL_SLOTS = ("resnet18", "yolov8")
 
 
@@ -178,26 +176,7 @@ def _predict_probabilities(image: torch.Tensor, model_type: str) -> torch.Tensor
             image_size=model_image_sizes[model_type],
             training=False,
         )
-        if model_type == "resnet18_two_head":
-            variety_logits, maturity_logits = selected_model(batch)
-            class_to_variety_idx = torch.tensor(
-                getattr(selected_model, "class_to_variety_idx"),
-                device=device,
-                dtype=torch.long,
-            )
-            class_to_maturity_idx = torch.tensor(
-                getattr(selected_model, "class_to_maturity_idx"),
-                device=device,
-                dtype=torch.long,
-            )
-            logits = _combine_two_head_logits(
-                variety_logits=variety_logits,
-                maturity_logits=maturity_logits,
-                class_to_variety_idx=class_to_variety_idx,
-                class_to_maturity_idx=class_to_maturity_idx,
-            )
-        else:
-            logits = selected_model(batch)
+        logits = selected_model(batch)
         return F.softmax(logits, dim=1)[0]
 
 
@@ -1940,23 +1919,14 @@ def _load_model(
         model_checkpoints["yolov8"] = checkpoint_path
         return
 
-    if requested_model_type not in {"resnet18", "resnet18_two_head"}:
-        raise ValueError("model_type must be 'resnet18', 'resnet18_two_head', or 'yolov8'.")
+    if requested_model_type != "resnet18":
+        raise ValueError("model_type must be 'resnet18' or 'yolov8'.")
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     classes = list(checkpoint["classes"])
     image_size = int(checkpoint["image_size"])
 
-    if requested_model_type == "resnet18_two_head":
-        loaded_model = _build_resnet18_two_head(
-            num_varieties=len(checkpoint["varieties"]),
-            num_maturities=len(checkpoint["maturities"]),
-            pretrained=False,
-        )
-        setattr(loaded_model, "class_to_variety_idx", list(checkpoint["class_to_variety_idx"]))
-        setattr(loaded_model, "class_to_maturity_idx", list(checkpoint["class_to_maturity_idx"]))
-    else:
-        loaded_model = _build_resnet18(num_classes=len(classes), pretrained=False)
+    loaded_model = _build_resnet18(num_classes=len(classes), pretrained=False)
     loaded_model.load_state_dict(checkpoint["model_state_dict"])
     loaded_model.to(device)
     loaded_model.eval()
@@ -1993,8 +1963,6 @@ def startup() -> None:
     preferred_model_type = _best_model_type_from_training_report()
     if preferred_model_type and loaded_models.get(preferred_model_type) is not None:
         loaded_model_type = preferred_model_type
-    elif loaded_models.get("resnet18_two_head") is not None:
-        loaded_model_type = "resnet18_two_head"
     elif loaded_models.get("resnet18") is not None:
         loaded_model_type = "resnet18"
     elif loaded_models.get("yolov8") is not None:
@@ -2034,12 +2002,6 @@ def list_supported_models() -> dict[str, Any]:
                 "android_exports": ["resnet18_android.ptl", "resnet18_android.onnx"],
             },
             {
-                "model_type": "resnet18_two_head",
-                "training_endpoint": "/training/start",
-                "checkpoint": "PyTorch .pt",
-                "android_exports": [],
-            },
-            {
                 "model_type": "yolov8",
                 "training_endpoint": "/training/start",
                 "checkpoint": "Ultralytics YOLOv8 .pt",
@@ -2072,7 +2034,7 @@ def technical_documentation() -> HTMLResponse:
 @app.get("/reports/assets/{model_type}/{asset_path:path}")
 def report_asset(model_type: str, asset_path: str) -> FileResponse:
     if model_type not in SUPPORTED_MODELS:
-        raise HTTPException(status_code=400, detail="model_type must be 'resnet18', 'resnet18_two_head', or 'yolov8'.")
+        raise HTTPException(status_code=400, detail="model_type must be 'resnet18' or 'yolov8'.")
 
     base_dir = _model_artifacts_dir(model_type).resolve()
     candidate = (base_dir / asset_path).resolve()
@@ -2090,7 +2052,7 @@ def load_model_endpoint(request: ModelLoadRequest) -> dict[str, Any]:
     if request.model_type is not None and request.model_type not in SUPPORTED_MODELS:
         raise HTTPException(
             status_code=400,
-            detail="model_type must be 'resnet18', 'resnet18_two_head', or 'yolov8'.",
+            detail="model_type must be 'resnet18' or 'yolov8'.",
         )
     checkpoint_path = Path(request.checkpoint_path).expanduser().resolve()
     _load_model(checkpoint_path=checkpoint_path, model_type=request.model_type)
@@ -2145,6 +2107,14 @@ def start_training(
             status_code=400,
             detail="Use ratios where val_ratio + test_ratio is less than 1.",
         )
+    if request.val_ratio + request.test_ratio > 0.5:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Use split ratios that keep at least 50% of images for training. "
+                "Recommended values: val_ratio=0.15 and test_ratio=0.15."
+            ),
+        )
     if request.label_mode not in {"variety", "maturity", "variety_maturity"}:
         raise HTTPException(
             status_code=400,
@@ -2158,7 +2128,7 @@ def start_training(
     if request.model_type not in SUPPORTED_MODELS:
         raise HTTPException(
             status_code=400,
-            detail="model_type must be 'resnet18', 'resnet18_two_head', or 'yolov8'.",
+            detail="model_type must be 'resnet18' or 'yolov8'.",
         )
 
     if not training_lock.acquire(blocking=False):
