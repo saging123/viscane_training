@@ -32,8 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="data/prepared",
         help="Where split dataset is written.",
     )
-    prep.add_argument("--val-ratio", type=float, default=0.15, help="Validation ratio.")
-    prep.add_argument("--test-ratio", type=float, default=0.15, help="Test ratio.")
+    prep.add_argument("--val-ratio", type=float, default=0.10, help="Validation ratio.")
+    prep.add_argument("--test-ratio", type=float, default=0.10, help="Test ratio.")
     prep.add_argument("--seed", type=int, default=42, help="Random seed.")
     prep.add_argument(
         "--resize",
@@ -239,8 +239,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="artifacts",
         help="Directory for model checkpoints and metrics.",
     )
-    all_cmd.add_argument("--val-ratio", type=float, default=0.15, help="Validation ratio.")
-    all_cmd.add_argument("--test-ratio", type=float, default=0.15, help="Test ratio.")
+    all_cmd.add_argument("--val-ratio", type=float, default=0.10, help="Validation ratio.")
+    all_cmd.add_argument("--test-ratio", type=float, default=0.10, help="Test ratio.")
     all_cmd.add_argument(
         "--resize",
         type=int,

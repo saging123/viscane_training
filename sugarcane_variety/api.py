@@ -74,8 +74,8 @@ class TrainingRequest(BaseModel):
     raw_dir: str = "content/data/raw/DATASETSFINAL"
     prepared_dir: str = "content/data/prepared"
     output_dir: str = "content/data/sugarcane_artifacts"
-    val_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
-    test_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
+    val_ratio: float = Field(default=0.10, ge=0.0, lt=1.0)
+    test_ratio: float = Field(default=0.10, ge=0.0, lt=1.0)
     resize: int | None = 256
     epochs: int = Field(default=35, ge=1)
     batch_size: int = Field(default=32, ge=1)
@@ -2112,7 +2112,7 @@ def start_training(
             status_code=400,
             detail=(
                 "Use split ratios that keep at least 50% of images for training. "
-                "Recommended values: val_ratio=0.15 and test_ratio=0.15."
+                "Recommended values: val_ratio=0.10 and test_ratio=0.10."
             ),
         )
     if request.label_mode not in {"variety", "maturity", "variety_maturity"}:

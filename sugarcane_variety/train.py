@@ -217,7 +217,7 @@ def _build_dataloaders(
             "Prepared split is invalid for training: the training split must be "
             f"larger than validation and test. Found train={len(train_ds)}, "
             f"val={len(val_ds)}, test={len(test_ds)}. Re-run preprocessing with "
-            "val_ratio=0.15 and test_ratio=0.15."
+            "val_ratio=0.10 and test_ratio=0.10."
         )
     return train_dl, val_dl, test_dl, train_ds.classes
 

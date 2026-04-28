@@ -210,19 +210,6 @@ def _split_class_items(
     return {"train": train, "val": val, "test": test}
 
 
-def _group_key_from_path(path: Path) -> str:
-    stem = path.stem.strip().lower()
-    capture_match = re.search(r"(img_\d{8}_\d{6}[a-z]?)", stem)
-    if capture_match:
-        return capture_match.group(1)
-    stem = re.sub(r"\s*\(\d+\)$", "", stem)
-    stem = re.sub(r"[_\-\s]+copy$", "", stem)
-    stem = re.sub(r"[_\-\s]+edited$", "", stem)
-    stem = re.sub(r"[_\-\s]+duplicate$", "", stem)
-    stem = re.sub(r"[^a-z0-9]+", "_", stem).strip("_")
-    return stem or path.stem.lower()
-
-
 def _content_hash_worker(path: str) -> tuple[str, str]:
     path_obj = Path(path)
     return path, hashlib.sha1(path_obj.read_bytes()).hexdigest()
@@ -248,37 +235,9 @@ def _group_items_for_splitting(
         return []
 
     content_hashes = _compute_content_hashes(items, workers=workers)
-    parent = list(range(len(items)))
-
-    def find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def union(left: int, right: int) -> None:
-        root_left = find(left)
-        root_right = find(right)
-        if root_left != root_right:
-            parent[root_right] = root_left
-
-    seen_capture_keys: Dict[str, int] = {}
-    seen_content_hashes: Dict[str, int] = {}
-    for index, item in enumerate(items):
-        capture_key = _group_key_from_path(item)
-        content_hash = content_hashes[item]
-        if capture_key in seen_capture_keys:
-            union(index, seen_capture_keys[capture_key])
-        else:
-            seen_capture_keys[capture_key] = index
-        if content_hash in seen_content_hashes:
-            union(index, seen_content_hashes[content_hash])
-        else:
-            seen_content_hashes[content_hash] = index
-
-    grouped_items: Dict[int, List[Path]] = {}
-    for index, item in enumerate(items):
-        grouped_items.setdefault(find(index), []).append(item)
+    grouped_items: Dict[str, List[Path]] = {}
+    for item in items:
+        grouped_items.setdefault(content_hashes[item], []).append(item)
     return list(grouped_items.values())
 
 
@@ -299,20 +258,38 @@ def _split_class_items_grouped(
     target_train = n_total - target_val - target_test
 
     split_to_items: Dict[str, List[Path]] = {"train": [], "val": [], "test": []}
+    split_to_groups: Dict[str, List[List[Path]]] = {"train": [], "val": [], "test": []}
     split_counts = {"train": 0, "val": 0, "test": 0}
     target_counts = {"train": target_train, "val": target_val, "test": target_test}
 
     for group in groups:
         group_size = len(group)
-        best_split = min(
-            ("train", "val", "test"),
-            key=lambda split_name: (
-                abs((split_counts[split_name] + group_size) - target_counts[split_name]),
-                split_counts[split_name],
-            ),
-        )
-        split_to_items[best_split].extend(group)
+        if group_size > max(target_val, target_test, 1) and split_counts["train"] < target_train:
+            best_split = "train"
+        else:
+            best_split = min(
+                ("train", "val", "test"),
+                key=lambda split_name: (
+                    abs((split_counts[split_name] + group_size) - target_counts[split_name]),
+                    split_counts[split_name],
+                ),
+            )
+        split_to_groups[best_split].append(group)
         split_counts[best_split] += group_size
+
+    while split_counts["train"] < max(split_counts["val"], split_counts["test"]):
+        donor = "val" if split_counts["val"] >= split_counts["test"] else "test"
+        if not split_to_groups[donor]:
+            break
+        group = max(split_to_groups[donor], key=len)
+        split_to_groups[donor].remove(group)
+        split_to_groups["train"].append(group)
+        split_counts[donor] -= len(group)
+        split_counts["train"] += len(group)
+
+    for split_name, split_groups in split_to_groups.items():
+        for group in split_groups:
+            split_to_items[split_name].extend(group)
 
     if not split_to_items["train"] and split_to_items["val"]:
         split_to_items["train"].append(split_to_items["val"].pop())
@@ -479,8 +456,8 @@ def _unique_dst_path(dst_dir: Path, src: Path, force_jpg: bool) -> Path:
 def run_preprocess(
     raw_dir: str,
     output_dir: str,
-    val_ratio: float = 0.15,
-    test_ratio: float = 0.15,
+    val_ratio: float = 0.10,
+    test_ratio: float = 0.10,
     seed: int = 42,
     image_size: int | None = None,
     label_mode: LabelMode = "variety",
