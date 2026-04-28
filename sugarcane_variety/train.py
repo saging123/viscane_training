@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import datasets, models, transforms
 from torchvision.transforms import functional as TF
 from torchvision.models import ResNet18_Weights
@@ -31,26 +31,26 @@ DEFAULT_TRAIN_RESIZE_SIZE = 256
 DEFAULT_TRAIN_NOISE_STD = 0.0
 DEFAULT_TRAIN_BLUR_PROB = 0.0
 DEFAULT_TRAIN_ERASE_PROB = 0.0
-DEFAULT_TRAIN_ROTATION_DEGREES = 5.0
-DEFAULT_TRAIN_CROP_SCALE = (0.90, 1.0)
-DEFAULT_TRAIN_CROP_RATIO = (0.85, 1.15)
-DEFAULT_TRAIN_HORIZONTAL_FLIP_PROB = 0.50
-DEFAULT_TRAIN_BRIGHTNESS_RANGE = (0.88, 1.12)
-DEFAULT_TRAIN_CONTRAST_RANGE = (0.88, 1.12)
-DEFAULT_TRAIN_SATURATION_RANGE = (0.92, 1.08)
-DEFAULT_TRAIN_HUE_RANGE = (-0.01, 0.01)
+DEFAULT_TRAIN_ROTATION_DEGREES = 3.0
+DEFAULT_TRAIN_CROP_SCALE = (0.95, 1.0)
+DEFAULT_TRAIN_CROP_RATIO = (0.95, 1.05)
+DEFAULT_TRAIN_HORIZONTAL_FLIP_PROB = 0.30
+DEFAULT_TRAIN_BRIGHTNESS_RANGE = (0.94, 1.06)
+DEFAULT_TRAIN_CONTRAST_RANGE = (0.94, 1.06)
+DEFAULT_TRAIN_SATURATION_RANGE = (0.96, 1.04)
+DEFAULT_TRAIN_HUE_RANGE = (0.0, 0.0)
 DEFAULT_YOLO_AUGMENTATION = {
-    "hsv_h": 0.003,
-    "hsv_s": 0.20,
-    "hsv_v": 0.18,
-    "degrees": 3.0,
-    "translate": 0.04,
-    "scale": 0.25,
+    "hsv_h": 0.001,
+    "hsv_s": 0.10,
+    "hsv_v": 0.10,
+    "degrees": 2.0,
+    "translate": 0.02,
+    "scale": 0.10,
     "shear": 0.0,
     "perspective": 0.0,
-    "fliplr": 0.50,
+    "fliplr": 0.30,
     "flipud": 0.0,
-    "mosaic": 0.30,
+    "mosaic": 0.10,
     "mixup": 0.0,
     "copy_paste": 0.0,
     "close_mosaic": 10,
@@ -58,6 +58,7 @@ DEFAULT_YOLO_AUGMENTATION = {
 }
 DEFAULT_LABEL_SMOOTHING = 0.0
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
+DEFAULT_USE_BALANCED_SAMPLER = True
 ModelType = Literal["resnet18", "yolov8"]
 ProgressCallback = Callable[[Dict[str, Any]], None]
 
@@ -177,17 +178,20 @@ def _build_dataloaders(
     image_size: int,
     batch_size: int,
     workers: int,
+    use_balanced_sampler: bool = DEFAULT_USE_BALANCED_SAMPLER,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, list[str]]:
     raw_tfms = transforms.PILToTensor()
 
     train_ds = datasets.ImageFolder(data_dir / "train", transform=raw_tfms)
     val_ds = datasets.ImageFolder(data_dir / "val", transform=raw_tfms)
     test_ds = datasets.ImageFolder(data_dir / "test", transform=raw_tfms)
+    train_sampler = _build_balanced_sampler(train_ds) if use_balanced_sampler else None
 
     train_dl = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         num_workers=workers,
         pin_memory=True,
         collate_fn=_collate_raw_images,
@@ -209,6 +213,24 @@ def _build_dataloaders(
         collate_fn=_collate_raw_images,
     )
     return train_dl, val_dl, test_dl, train_ds.classes
+
+
+def _build_balanced_sampler(
+    train_dataset: datasets.ImageFolder,
+) -> WeightedRandomSampler | None:
+    targets = getattr(train_dataset, "targets", None)
+    if not targets:
+        return None
+
+    target_tensor = torch.tensor(targets, dtype=torch.long)
+    counts = torch.bincount(target_tensor).clamp_min(1).to(dtype=torch.float32)
+    class_weights = 1.0 / counts
+    sample_weights = class_weights[target_tensor].to(dtype=torch.double)
+    return WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
 
 
 def _compute_class_weights(
@@ -547,6 +569,7 @@ def _run_resnet18_training(
     use_class_weights: bool = True,
     label_smoothing: float = DEFAULT_LABEL_SMOOTHING,
     freeze_backbone_epochs: int = DEFAULT_FREEZE_BACKBONE_EPOCHS,
+    use_balanced_sampler: bool = DEFAULT_USE_BALANCED_SAMPLER,
     progress_callback: ProgressCallback | None = None,
 ) -> TrainSummary:
     _set_seed(seed)
@@ -561,6 +584,7 @@ def _run_resnet18_training(
         image_size=image_size,
         batch_size=batch_size,
         workers=workers,
+        use_balanced_sampler=use_balanced_sampler,
     )
     if len(classes) < 2:
         raise ValueError("Need at least 2 classes to train a classifier.")
@@ -620,6 +644,7 @@ def _run_resnet18_training(
                     "early_stopping_patience": early_stopping_patience,
                     "early_stopping_min_delta": early_stopping_min_delta,
                     "use_class_weights": use_class_weights,
+                    "use_balanced_sampler": use_balanced_sampler,
                     "label_smoothing": label_smoothing,
                     "freeze_backbone_epochs": freeze_backbone_epochs,
                 },
@@ -796,6 +821,7 @@ def _run_resnet18_training(
             "early_stopping_patience": early_stopping_patience,
             "early_stopping_min_delta": early_stopping_min_delta,
             "use_class_weights": use_class_weights,
+            "use_balanced_sampler": use_balanced_sampler,
             "label_smoothing": label_smoothing,
             "freeze_backbone_epochs": freeze_backbone_epochs,
         },
@@ -1108,6 +1134,7 @@ def run_training(
     use_class_weights: bool = True,
     label_smoothing: float = DEFAULT_LABEL_SMOOTHING,
     freeze_backbone_epochs: int = DEFAULT_FREEZE_BACKBONE_EPOCHS,
+    use_balanced_sampler: bool = DEFAULT_USE_BALANCED_SAMPLER,
     model_type: ModelType = "resnet18",
     yolo_weights: str = "yolov8n-cls.pt",
     progress_callback: ProgressCallback | None = None,
@@ -1133,6 +1160,7 @@ def run_training(
             use_class_weights=use_class_weights,
             label_smoothing=label_smoothing,
             freeze_backbone_epochs=freeze_backbone_epochs,
+            use_balanced_sampler=use_balanced_sampler,
             progress_callback=progress_callback,
         )
     if model_type == "yolov8":

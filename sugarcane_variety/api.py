@@ -26,6 +26,7 @@ from sugarcane_variety.train import (
     DEFAULT_TRAIN_ERASE_PROB,
     DEFAULT_TRAIN_NOISE_STD,
     DEFAULT_TRAIN_ROTATION_DEGREES,
+    DEFAULT_USE_BALANCED_SAMPLER,
     _build_resnet18,
     _decode_class_name,
     _prepare_images_on_device,
@@ -90,6 +91,7 @@ class TrainingRequest(BaseModel):
     early_stopping_patience: int = Field(default=8, ge=0)
     early_stopping_min_delta: float = Field(default=0.002, ge=0.0)
     use_class_weights: bool = True
+    use_balanced_sampler: bool = DEFAULT_USE_BALANCED_SAMPLER
     label_mode: str = "variety_maturity"
     preprocess_device: str = "auto"
     preprocess_workers: int = Field(default=8, ge=1)
@@ -1793,6 +1795,7 @@ def _run_training_job(request: TrainingRequest) -> None:
             early_stopping_patience=request.early_stopping_patience,
             early_stopping_min_delta=request.early_stopping_min_delta,
             use_class_weights=request.use_class_weights,
+            use_balanced_sampler=request.use_balanced_sampler,
             label_mode=request.label_mode,
             preprocess_device=request.preprocess_device,
             preprocess_workers=request.preprocess_workers,
