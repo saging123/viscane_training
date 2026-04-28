@@ -33,13 +33,14 @@ LR = 2e-4
 WEIGHT_DECAY = 1e-3
 LABEL_SMOOTHING = 0.10
 FREEZE_BACKBONE_EPOCHS = 4
+USE_BALANCED_SAMPLER = False
 LABEL_MODE = "variety_maturity"
 MODEL_TYPES = ("resnet18", "yolov8")
 YOLO_WEIGHTS = "yolov8n-cls.pt"
-NOISE_STD = 0.01
-BLUR_PROB = 0.03
-ERASE_PROB = 0.02
-ROTATION_DEGREES = 5.0
+NOISE_STD = 0.0
+BLUR_PROB = 0.0
+ERASE_PROB = 0.0
+ROTATION_DEGREES = 3.0
 
 
 def _json_safe(value: Any) -> Any:
@@ -143,6 +144,7 @@ def _run_model_training(
         use_class_weights=True,
         label_smoothing=LABEL_SMOOTHING,
         freeze_backbone_epochs=FREEZE_BACKBONE_EPOCHS,
+        use_balanced_sampler=USE_BALANCED_SAMPLER,
         label_mode=LABEL_MODE,
         preprocess_device="cpu",
         preprocess_workers=PREPROCESS_WORKERS,
@@ -189,6 +191,7 @@ def _run_model_training(
             "label_smoothing": LABEL_SMOOTHING,
             "freeze_backbone_epochs": FREEZE_BACKBONE_EPOCHS,
             "weight_decay": WEIGHT_DECAY,
+            "use_balanced_sampler": USE_BALANCED_SAMPLER,
         },
         "preprocess": prep,
         "split_analysis": split_analysis,
@@ -305,6 +308,7 @@ def main() -> None:
             "weight_decay": WEIGHT_DECAY,
             "label_smoothing": LABEL_SMOOTHING,
             "freeze_backbone_epochs": FREEZE_BACKBONE_EPOCHS,
+            "use_balanced_sampler": USE_BALANCED_SAMPLER,
             "noise_std": NOISE_STD,
             "blur_prob": BLUR_PROB,
             "erase_prob": ERASE_PROB,

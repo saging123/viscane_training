@@ -194,10 +194,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable inverse-frequency class weighting for ResNet18 training loss.",
     )
     train.add_argument(
-        "--disable-balanced-sampler",
+        "--use-balanced-sampler",
         action="store_true",
-        default=not DEFAULT_USE_BALANCED_SAMPLER,
-        help="Disable balanced ResNet18 batch sampling for imbalanced classes.",
+        default=DEFAULT_USE_BALANCED_SAMPLER,
+        help="Enable balanced ResNet18 batch sampling for imbalanced classes.",
     )
     train.add_argument(
         "--model-type",
@@ -303,10 +303,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable inverse-frequency class weighting for ResNet18 training loss.",
     )
     all_cmd.add_argument(
-        "--disable-balanced-sampler",
+        "--use-balanced-sampler",
         action="store_true",
-        default=not DEFAULT_USE_BALANCED_SAMPLER,
-        help="Disable balanced ResNet18 batch sampling for imbalanced classes.",
+        default=DEFAULT_USE_BALANCED_SAMPLER,
+        help="Enable balanced ResNet18 batch sampling for imbalanced classes.",
     )
     all_cmd.add_argument(
         "--model-type",
@@ -459,7 +459,7 @@ def main() -> None:
             early_stopping_patience=args.early_stopping_patience,
             early_stopping_min_delta=args.early_stopping_min_delta,
             use_class_weights=not args.disable_class_weights,
-            use_balanced_sampler=not args.disable_balanced_sampler,
+            use_balanced_sampler=args.use_balanced_sampler,
             model_type=args.model_type,
             yolo_weights=args.yolo_weights,
         )
@@ -547,7 +547,7 @@ def main() -> None:
             early_stopping_patience=args.early_stopping_patience,
             early_stopping_min_delta=args.early_stopping_min_delta,
             use_class_weights=not args.disable_class_weights,
-            use_balanced_sampler=not args.disable_balanced_sampler,
+            use_balanced_sampler=args.use_balanced_sampler,
             model_type=args.model_type,
             yolo_weights=args.yolo_weights,
         )

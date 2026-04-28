@@ -58,7 +58,7 @@ DEFAULT_YOLO_AUGMENTATION = {
 }
 DEFAULT_LABEL_SMOOTHING = 0.0
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
-DEFAULT_USE_BALANCED_SAMPLER = True
+DEFAULT_USE_BALANCED_SAMPLER = False
 ModelType = Literal["resnet18", "yolov8"]
 ProgressCallback = Callable[[Dict[str, Any]], None]
 
