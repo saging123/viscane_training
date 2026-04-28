@@ -1318,15 +1318,50 @@ def _build_model_doc_payload(model_type: str) -> dict[str, Any]:
     }
 
 
+def _extract_class_count_from_source(source: dict[str, Any]) -> int:
+    for key in ("classes", "class_names", "names"):
+        value = source.get(key)
+
+        if isinstance(value, list):
+            return len(value)
+        
+        if isinstance(value, dict):
+            return len(value)
+
+    per_class = source.get("per_class")
+    if isinstance(per_class, list):
+        class_names = {
+            str(row.get("class_name"))
+            for row in per_class
+            if isinstance(row, dict) and row.get("class_name")
+        }
+        if class_names:
+            return len(class_names)
+
+
+    overall_class_counts = source.get("overall_class_counts")
+    if isinstance(overall_class_counts, dict):
+        return len(overall_class_counts)
+
+    return 0
+
 def _class_count_from_payload(payload: dict[str, Any], model_type: str) -> int:
-    for key in ("test_summary", "metrics", "android_metadata"):
+
+    loaded_classes = model_classes.get(model_type, [])
+    if loaded_classes:
+        return len(loaded_classes)
+
+
+    for key in ("android_metadata", "metrics", "test_summary"):
         source = payload.get(key)
         if not isinstance(source, dict):
             continue
-        classes = source.get("classes")
-        if isinstance(classes, list):
-            return len(classes)
-    return len(model_classes.get(model_type, []))
+
+        count = _extract_class_count_from_source(source)
+        if count > 0:
+            return count
+
+    return 0
 
 
 def _render_model_doc_section(model_type: str) -> str:
