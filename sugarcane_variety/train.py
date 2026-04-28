@@ -59,7 +59,7 @@ DEFAULT_YOLO_AUGMENTATION = {
 DEFAULT_LABEL_SMOOTHING = 0.0
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
 DEFAULT_USE_BALANCED_SAMPLER = False
-ModelType = Literal["resnet18", "yolov8"]
+ModelType = Literal["resnet18", "resnet18_two_head", "yolov8"]
 ProgressCallback = Callable[[Dict[str, Any]], None]
 
 
@@ -248,6 +248,48 @@ def _compute_class_weights(
     return weights / weights.mean()
 
 
+def _build_two_head_label_maps(classes: list[str]) -> dict[str, object]:
+    decoded = [_decode_class_name(name) for name in classes]
+    if not all(item["variety"] and item["maturity_status"] for item in decoded):
+        raise ValueError(
+            "resnet18_two_head requires combined labels formatted like variety__maturity."
+        )
+
+    varieties = sorted({item["variety"] for item in decoded})
+    maturities = sorted({item["maturity_status"] for item in decoded})
+    variety_to_idx = {name: idx for idx, name in enumerate(varieties)}
+    maturity_to_idx = {name: idx for idx, name in enumerate(maturities)}
+    class_to_variety_idx = [variety_to_idx[item["variety"]] for item in decoded]
+    class_to_maturity_idx = [maturity_to_idx[item["maturity_status"]] for item in decoded]
+
+    return {
+        "varieties": varieties,
+        "maturities": maturities,
+        "class_to_variety_idx": class_to_variety_idx,
+        "class_to_maturity_idx": class_to_maturity_idx,
+    }
+
+
+def _two_head_targets(
+    labels: torch.Tensor,
+    class_to_variety_idx: torch.Tensor,
+    class_to_maturity_idx: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return class_to_variety_idx[labels], class_to_maturity_idx[labels]
+
+
+def _combine_two_head_logits(
+    variety_logits: torch.Tensor,
+    maturity_logits: torch.Tensor,
+    class_to_variety_idx: torch.Tensor,
+    class_to_maturity_idx: torch.Tensor,
+) -> torch.Tensor:
+    return (
+        variety_logits.index_select(dim=1, index=class_to_variety_idx)
+        + maturity_logits.index_select(dim=1, index=class_to_maturity_idx)
+    )
+
+
 def _collate_raw_images(
     batch: list[tuple[torch.Tensor, int]],
 ) -> tuple[list[torch.Tensor], torch.Tensor]:
@@ -379,9 +421,41 @@ def _build_resnet18(num_classes: int, pretrained: bool) -> nn.Module:
     return model
 
 
+class ResNet18TwoHead(nn.Module):
+    def __init__(self, num_varieties: int, num_maturities: int, pretrained: bool) -> None:
+        super().__init__()
+        weights = ResNet18_Weights.DEFAULT if pretrained else None
+        backbone = models.resnet18(weights=weights)
+        in_features = backbone.fc.in_features
+        backbone.fc = nn.Identity()
+        self.backbone = backbone
+        self.variety_head = nn.Linear(in_features, num_varieties)
+        self.maturity_head = nn.Linear(in_features, num_maturities)
+
+    def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        features = self.backbone(images)
+        return self.variety_head(features), self.maturity_head(features)
+
+
+def _build_resnet18_two_head(
+    num_varieties: int,
+    num_maturities: int,
+    pretrained: bool,
+) -> nn.Module:
+    return ResNet18TwoHead(
+        num_varieties=num_varieties,
+        num_maturities=num_maturities,
+        pretrained=pretrained,
+    )
+
+
 def _set_resnet_backbone_trainable(model: nn.Module, trainable: bool) -> None:
     for name, parameter in model.named_parameters():
-        if not name.startswith("fc."):
+        if not (
+            name.startswith("fc.")
+            or name.startswith("variety_head.")
+            or name.startswith("maturity_head.")
+        ):
             parameter.requires_grad = trainable
 
 
@@ -507,8 +581,8 @@ def _write_android_metadata(
         "onnx_artifact_path": onnx_artifact_path,
         "input_format": "RGB image resized/cropped to CHW float tensor",
         "input_range": "0.0 to 1.0 before normalization",
-        "normalization_mean": IMAGENET_MEAN if model_type == "resnet18" else None,
-        "normalization_std": IMAGENET_STD if model_type == "resnet18" else None,
+        "normalization_mean": IMAGENET_MEAN if model_type.startswith("resnet18") else None,
+        "normalization_std": IMAGENET_STD if model_type.startswith("resnet18") else None,
         "output": "class logits/probabilities ordered by the classes array",
     }
     metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -547,6 +621,86 @@ def _eval_epoch(
         losses.append(loss.item())
         accs.append(_accuracy(logits, labels))
     return float(np.mean(losses)), float(np.mean(accs))
+
+
+@torch.no_grad()
+def _eval_two_head_epoch(
+    model: nn.Module,
+    dataloader: DataLoader,
+    device: torch.device,
+    variety_criterion: nn.Module,
+    maturity_criterion: nn.Module,
+    image_size: int,
+    class_to_variety_idx: torch.Tensor,
+    class_to_maturity_idx: torch.Tensor,
+    augment_validation: bool = False,
+    noise_std: float = DEFAULT_TRAIN_NOISE_STD,
+    blur_prob: float = DEFAULT_TRAIN_BLUR_PROB,
+    rotation_degrees: float = DEFAULT_TRAIN_ROTATION_DEGREES,
+) -> Tuple[float, float, float, float]:
+    model.eval()
+    losses = []
+    exact_accs = []
+    variety_accs = []
+    maturity_accs = []
+    for images, labels in dataloader:
+        images = _prepare_images_on_device(
+            images,
+            device=device,
+            image_size=image_size,
+            training=False,
+            augment_validation=augment_validation,
+            noise_std=noise_std,
+            blur_prob=blur_prob,
+            rotation_degrees=rotation_degrees,
+        )
+        labels = labels.to(device, non_blocking=True)
+        variety_targets, maturity_targets = _two_head_targets(
+            labels,
+            class_to_variety_idx=class_to_variety_idx,
+            class_to_maturity_idx=class_to_maturity_idx,
+        )
+        variety_logits, maturity_logits = model(images)
+        loss = (
+            variety_criterion(variety_logits, variety_targets)
+            + maturity_criterion(maturity_logits, maturity_targets)
+        )
+        combined_logits = _combine_two_head_logits(
+            variety_logits=variety_logits,
+            maturity_logits=maturity_logits,
+            class_to_variety_idx=class_to_variety_idx,
+            class_to_maturity_idx=class_to_maturity_idx,
+        )
+        losses.append(loss.item())
+        exact_accs.append(_accuracy(combined_logits, labels))
+        variety_accs.append(_accuracy(variety_logits, variety_targets))
+        maturity_accs.append(_accuracy(maturity_logits, maturity_targets))
+    return (
+        float(np.mean(losses)),
+        float(np.mean(exact_accs)),
+        float(np.mean(variety_accs)),
+        float(np.mean(maturity_accs)),
+    )
+
+
+def _head_class_weights(
+    train_dataset: datasets.ImageFolder,
+    class_to_head_idx: list[int],
+    num_head_classes: int,
+    device: torch.device,
+) -> torch.Tensor:
+    targets = getattr(train_dataset, "targets", None)
+    if not targets:
+        return torch.ones(num_head_classes, device=device, dtype=torch.float32)
+
+    mapped_targets = torch.tensor(
+        [class_to_head_idx[target] for target in targets],
+        dtype=torch.long,
+    )
+    counts = torch.bincount(mapped_targets, minlength=num_head_classes)
+    counts = counts.clamp_min(1).to(device=device, dtype=torch.float32)
+    weights = counts.sum() / (counts * float(num_head_classes))
+    return weights / weights.mean()
 
 
 def _run_resnet18_training(
@@ -879,6 +1033,359 @@ def _run_resnet18_training(
     )
 
 
+def _run_resnet18_two_head_training(
+    prepared_dir: str,
+    output_dir: str,
+    epochs: int = DEFAULT_TRAIN_EPOCHS,
+    batch_size: int = 32,
+    lr: float = DEFAULT_TRAIN_LR,
+    weight_decay: float = DEFAULT_TRAIN_WEIGHT_DECAY,
+    image_size: int = 224,
+    workers: int = 8,
+    seed: int = 42,
+    augment_validation: bool = False,
+    noise_std: float = DEFAULT_TRAIN_NOISE_STD,
+    blur_prob: float = DEFAULT_TRAIN_BLUR_PROB,
+    erase_prob: float = DEFAULT_TRAIN_ERASE_PROB,
+    rotation_degrees: float = DEFAULT_TRAIN_ROTATION_DEGREES,
+    early_stopping_patience: int = DEFAULT_EARLY_STOPPING_PATIENCE,
+    early_stopping_min_delta: float = DEFAULT_EARLY_STOPPING_MIN_DELTA,
+    use_class_weights: bool = True,
+    label_smoothing: float = DEFAULT_LABEL_SMOOTHING,
+    freeze_backbone_epochs: int = DEFAULT_FREEZE_BACKBONE_EPOCHS,
+    use_balanced_sampler: bool = DEFAULT_USE_BALANCED_SAMPLER,
+    progress_callback: ProgressCallback | None = None,
+) -> TrainSummary:
+    _set_seed(seed)
+    data_dir = Path(prepared_dir).expanduser().resolve()
+    out_dir = Path(output_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    _validate_prepared_dir(data_dir)
+    train_dl, val_dl, test_dl, classes = _build_dataloaders(
+        data_dir=data_dir,
+        image_size=image_size,
+        batch_size=batch_size,
+        workers=workers,
+        use_balanced_sampler=use_balanced_sampler,
+    )
+    label_maps = _build_two_head_label_maps(classes)
+    varieties = list(label_maps["varieties"])
+    maturities = list(label_maps["maturities"])
+    class_to_variety = list(label_maps["class_to_variety_idx"])
+    class_to_maturity = list(label_maps["class_to_maturity_idx"])
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    class_to_variety_tensor = torch.tensor(class_to_variety, device=device, dtype=torch.long)
+    class_to_maturity_tensor = torch.tensor(class_to_maturity, device=device, dtype=torch.long)
+
+    model = _build_resnet18_two_head(
+        num_varieties=len(varieties),
+        num_maturities=len(maturities),
+        pretrained=True,
+    )
+    if freeze_backbone_epochs > 0:
+        _set_resnet_backbone_trainable(model, False)
+    model.to(device)
+
+    variety_weights = None
+    maturity_weights = None
+    if use_class_weights:
+        variety_weights = _head_class_weights(
+            train_dl.dataset,
+            class_to_head_idx=class_to_variety,
+            num_head_classes=len(varieties),
+            device=device,
+        )
+        maturity_weights = _head_class_weights(
+            train_dl.dataset,
+            class_to_head_idx=class_to_maturity,
+            num_head_classes=len(maturities),
+            device=device,
+        )
+
+    train_variety_criterion = nn.CrossEntropyLoss(
+        weight=variety_weights,
+        label_smoothing=max(0.0, min(float(label_smoothing), 0.4)),
+    )
+    train_maturity_criterion = nn.CrossEntropyLoss(
+        weight=maturity_weights,
+        label_smoothing=max(0.0, min(float(label_smoothing), 0.4)),
+    )
+    eval_variety_criterion = nn.CrossEntropyLoss()
+    eval_maturity_criterion = nn.CrossEntropyLoss()
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs, 1))
+
+    best_val_acc = -1.0
+    best_epoch = 0
+    epochs_without_improvement = 0
+    stopped_early = False
+    best_ckpt = out_dir / "best_model.pt"
+    epoch_history: List[Dict[str, object]] = []
+
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "training_started",
+                "model_type": "resnet18_two_head",
+                "epochs": epochs,
+                "classes": classes,
+                "varieties": varieties,
+                "maturities": maturities,
+                "output_dir": str(out_dir),
+                "device": str(device),
+                "training_controls": {
+                    "early_stopping_patience": early_stopping_patience,
+                    "early_stopping_min_delta": early_stopping_min_delta,
+                    "use_class_weights": use_class_weights,
+                    "use_balanced_sampler": use_balanced_sampler,
+                    "label_smoothing": label_smoothing,
+                    "freeze_backbone_epochs": freeze_backbone_epochs,
+                },
+            }
+        )
+
+    for epoch in range(1, epochs + 1):
+        if freeze_backbone_epochs > 0 and epoch == freeze_backbone_epochs + 1:
+            _set_resnet_backbone_trainable(model, True)
+
+        model.train()
+        batch_losses = []
+        batch_exact_accs = []
+        batch_variety_accs = []
+        batch_maturity_accs = []
+
+        for images, labels in train_dl:
+            images = _prepare_images_on_device(
+                images,
+                device=device,
+                image_size=image_size,
+                training=True,
+                noise_std=noise_std,
+                blur_prob=blur_prob,
+                erase_prob=erase_prob,
+                rotation_degrees=rotation_degrees,
+            )
+            labels = labels.to(device, non_blocking=True)
+            variety_targets, maturity_targets = _two_head_targets(
+                labels,
+                class_to_variety_idx=class_to_variety_tensor,
+                class_to_maturity_idx=class_to_maturity_tensor,
+            )
+
+            optimizer.zero_grad(set_to_none=True)
+            variety_logits, maturity_logits = model(images)
+            loss = (
+                train_variety_criterion(variety_logits, variety_targets)
+                + train_maturity_criterion(maturity_logits, maturity_targets)
+            )
+            loss.backward()
+            optimizer.step()
+
+            combined_logits = _combine_two_head_logits(
+                variety_logits=variety_logits,
+                maturity_logits=maturity_logits,
+                class_to_variety_idx=class_to_variety_tensor,
+                class_to_maturity_idx=class_to_maturity_tensor,
+            )
+            batch_losses.append(loss.item())
+            batch_exact_accs.append(_accuracy(combined_logits, labels))
+            batch_variety_accs.append(_accuracy(variety_logits, variety_targets))
+            batch_maturity_accs.append(_accuracy(maturity_logits, maturity_targets))
+
+        scheduler.step()
+        current_lr = float(scheduler.get_last_lr()[0])
+        train_loss = float(np.mean(batch_losses))
+        train_acc = float(np.mean(batch_exact_accs))
+        train_variety_acc = float(np.mean(batch_variety_accs))
+        train_maturity_acc = float(np.mean(batch_maturity_accs))
+        val_loss, val_acc, val_variety_acc, val_maturity_acc = _eval_two_head_epoch(
+            model=model,
+            dataloader=val_dl,
+            device=device,
+            variety_criterion=eval_variety_criterion,
+            maturity_criterion=eval_maturity_criterion,
+            image_size=image_size,
+            class_to_variety_idx=class_to_variety_tensor,
+            class_to_maturity_idx=class_to_maturity_tensor,
+            augment_validation=augment_validation,
+            noise_std=noise_std,
+            blur_prob=blur_prob,
+            rotation_degrees=rotation_degrees,
+        )
+        epoch_record = {
+            "epoch": epoch,
+            "epochs": epochs,
+            "train_loss": train_loss,
+            "train_acc": train_acc,
+            "train_variety_acc": train_variety_acc,
+            "train_maturity_acc": train_maturity_acc,
+            "val_loss": val_loss,
+            "val_acc": val_acc,
+            "val_variety_acc": val_variety_acc,
+            "val_maturity_acc": val_maturity_acc,
+            "best_val_acc": best_val_acc if best_val_acc > val_acc else val_acc,
+            "lr": current_lr,
+        }
+        epoch_history.append(epoch_record)
+
+        print(
+            f"Epoch {epoch:02d}/{epochs} "
+            f"| train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
+            f"| val_loss={val_loss:.4f} val_acc={val_acc:.4f} "
+            f"| val_variety={val_variety_acc:.4f} val_maturity={val_maturity_acc:.4f}"
+        )
+
+        improvement = val_acc - best_val_acc
+        if improvement > early_stopping_min_delta:
+            best_val_acc = val_acc
+            best_epoch = epoch
+            epochs_without_improvement = 0
+            torch.save(
+                {
+                    "model_type": "resnet18_two_head",
+                    "model_state_dict": model.state_dict(),
+                    "classes": classes,
+                    "varieties": varieties,
+                    "maturities": maturities,
+                    "class_to_variety_idx": class_to_variety,
+                    "class_to_maturity_idx": class_to_maturity,
+                    "image_size": image_size,
+                },
+                best_ckpt,
+            )
+        else:
+            epochs_without_improvement += 1
+
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "epoch_completed",
+                    "model_type": "resnet18_two_head",
+                    "checkpoint_path": str(best_ckpt),
+                    "epochs_without_improvement": epochs_without_improvement,
+                    **epoch_record,
+                }
+            )
+        if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
+            stopped_early = True
+            break
+
+    checkpoint = torch.load(best_ckpt, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    test_loss, test_acc, test_variety_acc, test_maturity_acc = _eval_two_head_epoch(
+        model=model,
+        dataloader=test_dl,
+        device=device,
+        variety_criterion=eval_variety_criterion,
+        maturity_criterion=eval_maturity_criterion,
+        image_size=image_size,
+        class_to_variety_idx=class_to_variety_tensor,
+        class_to_maturity_idx=class_to_maturity_tensor,
+        augment_validation=augment_validation,
+        noise_std=noise_std,
+        blur_prob=blur_prob,
+        rotation_degrees=rotation_degrees,
+    )
+    print(
+        f"Final test | loss={test_loss:.4f} acc={test_acc:.4f} "
+        f"variety_acc={test_variety_acc:.4f} maturity_acc={test_maturity_acc:.4f}"
+    )
+
+    android_artifact_path = None
+    onnx_artifact_path = None
+    android_metadata_path = _write_android_metadata(
+        out_dir=out_dir,
+        model_type="resnet18_two_head",
+        classes=classes,
+        image_size=image_size,
+        checkpoint_path=str(best_ckpt),
+        onnx_artifact_path=onnx_artifact_path,
+        android_artifact_path=android_artifact_path,
+    )
+
+    metrics: Dict[str, object] = {
+        "model_type": "resnet18_two_head",
+        "classes": classes,
+        "class_label_components": [_decode_class_name(name) for name in classes],
+        "varieties": varieties,
+        "maturities": maturities,
+        "best_val_acc": best_val_acc,
+        "test_acc": test_acc,
+        "test_variety_acc": test_variety_acc,
+        "test_maturity_acc": test_maturity_acc,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "learning_rate": lr,
+        "weight_decay": weight_decay,
+        "image_size": image_size,
+        "seed": seed,
+        "device": str(device),
+        "best_epoch": best_epoch,
+        "stopped_early": stopped_early,
+        "training_controls": {
+            "early_stopping_patience": early_stopping_patience,
+            "early_stopping_min_delta": early_stopping_min_delta,
+            "use_class_weights": use_class_weights,
+            "use_balanced_sampler": use_balanced_sampler,
+            "label_smoothing": label_smoothing,
+            "freeze_backbone_epochs": freeze_backbone_epochs,
+        },
+        "augmentation": {
+            "augment_validation": False,
+            "train_resize_size": DEFAULT_TRAIN_RESIZE_SIZE,
+            "train_crop_size": image_size,
+            "validation_resize_size": image_size,
+            "test_resize_size": image_size,
+            "noise_std": noise_std,
+            "blur_prob": blur_prob,
+            "erase_prob": erase_prob,
+            "rotation_degrees": rotation_degrees,
+            "crop_scale": DEFAULT_TRAIN_CROP_SCALE,
+            "crop_ratio": DEFAULT_TRAIN_CROP_RATIO,
+            "horizontal_flip_prob": DEFAULT_TRAIN_HORIZONTAL_FLIP_PROB,
+            "brightness_range": DEFAULT_TRAIN_BRIGHTNESS_RANGE,
+            "contrast_range": DEFAULT_TRAIN_CONTRAST_RANGE,
+            "saturation_range": DEFAULT_TRAIN_SATURATION_RANGE,
+            "hue_range": DEFAULT_TRAIN_HUE_RANGE,
+        },
+        "epoch_history": epoch_history,
+        "android_artifact_path": android_artifact_path,
+        "onnx_artifact_path": onnx_artifact_path,
+        "android_metadata_path": android_metadata_path,
+    }
+    metrics_path = out_dir / "metrics.json"
+    metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "training_completed",
+                "model_type": "resnet18_two_head",
+                "best_val_acc": best_val_acc,
+                "test_acc": test_acc,
+                "test_variety_acc": test_variety_acc,
+                "test_maturity_acc": test_maturity_acc,
+                "checkpoint_path": str(best_ckpt),
+                "metrics_path": str(metrics_path),
+                "best_epoch": best_epoch,
+                "stopped_early": stopped_early,
+                "android_metadata_path": android_metadata_path,
+            }
+        )
+
+    return TrainSummary(
+        best_val_acc=best_val_acc,
+        test_acc=test_acc,
+        classes=classes,
+        checkpoint_path=str(best_ckpt),
+        model_type="resnet18_two_head",
+        android_artifact_path=android_artifact_path,
+        onnx_artifact_path=onnx_artifact_path,
+        android_metadata_path=android_metadata_path,
+    )
+
+
 def _run_yolov8_training(
     prepared_dir: str,
     output_dir: str,
@@ -1163,6 +1670,30 @@ def run_training(
             use_balanced_sampler=use_balanced_sampler,
             progress_callback=progress_callback,
         )
+    if model_type == "resnet18_two_head":
+        return _run_resnet18_two_head_training(
+            prepared_dir=prepared_dir,
+            output_dir=output_dir,
+            epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            weight_decay=weight_decay,
+            image_size=image_size,
+            workers=workers,
+            seed=seed,
+            augment_validation=augment_validation,
+            noise_std=noise_std,
+            blur_prob=blur_prob,
+            erase_prob=erase_prob,
+            rotation_degrees=rotation_degrees,
+            early_stopping_patience=early_stopping_patience,
+            early_stopping_min_delta=early_stopping_min_delta,
+            use_class_weights=use_class_weights,
+            label_smoothing=label_smoothing,
+            freeze_backbone_epochs=freeze_backbone_epochs,
+            use_balanced_sampler=use_balanced_sampler,
+            progress_callback=progress_callback,
+        )
     if model_type == "yolov8":
         return _run_yolov8_training(
             prepared_dir=prepared_dir,
@@ -1178,7 +1709,7 @@ def run_training(
             early_stopping_patience=early_stopping_patience,
             progress_callback=progress_callback,
         )
-    raise ValueError("model_type must be 'resnet18' or 'yolov8'.")
+    raise ValueError("model_type must be 'resnet18', 'resnet18_two_head', or 'yolov8'.")
 
 
 def run_evaluation(
@@ -1225,8 +1756,17 @@ def run_evaluation(
             batch_size=batch_size,
             workers=workers,
         )
+    if inferred_model_type == "resnet18_two_head":
+        return _run_resnet18_two_head_evaluation(
+            prepared_dir=prepared_dir,
+            checkpoint_path=checkpoint_path,
+            batch_size=batch_size,
+            workers=workers,
+            checkpoint=checkpoint,
+            device=device,
+        )
     if inferred_model_type != "resnet18":
-        raise ValueError("model_type must be 'resnet18' or 'yolov8'.")
+        raise ValueError("model_type must be 'resnet18', 'resnet18_two_head', or 'yolov8'.")
 
     classes = checkpoint["classes"]
     image_size = int(checkpoint["image_size"])
@@ -1394,6 +1934,196 @@ def run_evaluation(
         interpretation_points=interpretation_points,
         summary_json_path=str(summary_json_path),
         model_type="resnet18",
+    )
+
+
+def _run_resnet18_two_head_evaluation(
+    prepared_dir: str,
+    checkpoint_path: str,
+    batch_size: int,
+    workers: int,
+    checkpoint: dict[str, Any],
+    device: torch.device,
+) -> EvalSummary:
+    data_dir = Path(prepared_dir).expanduser().resolve()
+    ckpt_path = Path(checkpoint_path).expanduser().resolve()
+    test_path = data_dir / "test"
+
+    classes = list(checkpoint["classes"])
+    varieties = list(checkpoint["varieties"])
+    maturities = list(checkpoint["maturities"])
+    class_to_variety = list(checkpoint["class_to_variety_idx"])
+    class_to_maturity = list(checkpoint["class_to_maturity_idx"])
+    image_size = int(checkpoint["image_size"])
+
+    test_ds = datasets.ImageFolder(test_path, transform=transforms.PILToTensor())
+    if test_ds.classes != classes:
+        raise ValueError(
+            "Class mismatch between checkpoint and test data.\n"
+            f"Checkpoint classes: {classes}\n"
+            f"Test classes: {test_ds.classes}"
+        )
+    test_dl = DataLoader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=workers,
+        pin_memory=True,
+        collate_fn=_collate_raw_images,
+    )
+
+    class_to_variety_tensor = torch.tensor(class_to_variety, device=device, dtype=torch.long)
+    class_to_maturity_tensor = torch.tensor(class_to_maturity, device=device, dtype=torch.long)
+    model = _build_resnet18_two_head(
+        num_varieties=len(varieties),
+        num_maturities=len(maturities),
+        pretrained=False,
+    )
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(device)
+    model.eval()
+
+    variety_criterion = nn.CrossEntropyLoss()
+    maturity_criterion = nn.CrossEntropyLoss()
+    loss_sum = 0.0
+    num_samples = 0
+    all_preds: List[int] = []
+    all_targets: List[int] = []
+    variety_correct = 0
+    maturity_correct = 0
+
+    with torch.no_grad():
+        for images, labels in test_dl:
+            images = _prepare_images_on_device(
+                images,
+                device=device,
+                image_size=image_size,
+                training=False,
+            )
+            labels = labels.to(device, non_blocking=True)
+            variety_targets, maturity_targets = _two_head_targets(
+                labels,
+                class_to_variety_idx=class_to_variety_tensor,
+                class_to_maturity_idx=class_to_maturity_tensor,
+            )
+            variety_logits, maturity_logits = model(images)
+            loss = (
+                variety_criterion(variety_logits, variety_targets)
+                + maturity_criterion(maturity_logits, maturity_targets)
+            )
+            combined_logits = _combine_two_head_logits(
+                variety_logits=variety_logits,
+                maturity_logits=maturity_logits,
+                class_to_variety_idx=class_to_variety_tensor,
+                class_to_maturity_idx=class_to_maturity_tensor,
+            )
+            batch_size_now = labels.size(0)
+            preds = torch.argmax(combined_logits, dim=1)
+            variety_preds = torch.argmax(variety_logits, dim=1)
+            maturity_preds = torch.argmax(maturity_logits, dim=1)
+
+            loss_sum += loss.item() * batch_size_now
+            num_samples += batch_size_now
+            all_targets.extend(labels.detach().cpu().tolist())
+            all_preds.extend(preds.detach().cpu().tolist())
+            variety_correct += int((variety_preds == variety_targets).sum().item())
+            maturity_correct += int((maturity_preds == maturity_targets).sum().item())
+
+    if num_samples == 0:
+        raise ValueError(f"No test samples found in: {test_path}")
+
+    test_loss = loss_sum / num_samples
+    test_acc = float(np.mean(np.array(all_preds) == np.array(all_targets)))
+    variety_acc = variety_correct / num_samples
+    maturity_acc = maturity_correct / num_samples
+    print(
+        f"Test only | loss={test_loss:.4f} acc={test_acc:.4f} "
+        f"variety_acc={variety_acc:.4f} maturity_acc={maturity_acc:.4f}"
+    )
+
+    decoded = [_decode_class_name(name) for name in classes]
+    class_support = [0] * len(classes)
+    class_correct = [0] * len(classes)
+    confusion = np.zeros((len(classes), len(classes)), dtype=np.int64)
+    for target_idx, pred_idx in zip(all_targets, all_preds):
+        class_support[target_idx] += 1
+        if target_idx == pred_idx:
+            class_correct[target_idx] += 1
+        confusion[target_idx, pred_idx] += 1
+
+    per_class: List[Dict[str, object]] = []
+    for idx, class_name in enumerate(classes):
+        support = class_support[idx]
+        correct = class_correct[idx]
+        info = decoded[idx]
+        per_class.append(
+            {
+                "class_name": class_name,
+                "variety": info["variety"],
+                "maturity_status": info["maturity_status"],
+                "support": support,
+                "correct": correct,
+                "accuracy": (correct / support) if support > 0 else 0.0,
+            }
+        )
+
+    confusion_pairs: List[Dict[str, object]] = []
+    for true_idx in range(len(classes)):
+        for pred_idx in range(len(classes)):
+            if true_idx == pred_idx:
+                continue
+            count = int(confusion[true_idx, pred_idx])
+            if count > 0:
+                confusion_pairs.append(
+                    {
+                        "true_class": classes[true_idx],
+                        "predicted_class": classes[pred_idx],
+                        "count": count,
+                    }
+                )
+    confusion_pairs.sort(key=lambda x: int(x["count"]), reverse=True)
+    top_confusions = confusion_pairs[:10]
+
+    interpretation_points = [
+        f"Exact label accuracy (variety + maturity): {test_acc:.2%}",
+        f"Variety-head accuracy: {variety_acc:.2%}",
+        f"Maturity-head accuracy: {maturity_acc:.2%}",
+        "Two-head ResNet18 trains separate variety and maturity outputs over a shared backbone.",
+    ]
+    friendly_outcome = _friendly_outcome_text(test_acc)
+    summary_json_path = ckpt_path.parent / "test_summary.json"
+    summary_payload: Dict[str, object] = {
+        "test_loss": test_loss,
+        "test_acc": test_acc,
+        "num_samples": num_samples,
+        "classes": classes,
+        "checkpoint_path": str(ckpt_path),
+        "device": str(device),
+        "label_task": "variety_maturity_two_head",
+        "variety_acc": variety_acc,
+        "maturity_acc": maturity_acc,
+        "per_class": per_class,
+        "top_confusions": top_confusions,
+        "friendly_outcome": friendly_outcome,
+        "interpretation_points": interpretation_points,
+    }
+    summary_json_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+
+    return EvalSummary(
+        test_loss=test_loss,
+        test_acc=test_acc,
+        num_samples=num_samples,
+        classes=classes,
+        checkpoint_path=str(ckpt_path),
+        device=str(device),
+        variety_acc=variety_acc,
+        maturity_acc=maturity_acc,
+        per_class=per_class,
+        top_confusions=top_confusions,
+        friendly_outcome=friendly_outcome,
+        interpretation_points=interpretation_points,
+        summary_json_path=str(summary_json_path),
+        model_type="resnet18_two_head",
     )
 
 
