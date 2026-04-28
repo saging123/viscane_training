@@ -36,8 +36,8 @@ Use `main.py` as the entrypoint.
 python main.py preprocess \
   --raw-dir /path/to/your_raw_dataset \
   --prepared-dir data/prepared \
-  --val-ratio 0.15 \
-  --test-ratio 0.15 \
+  --val-ratio 0.10 \
+  --test-ratio 0.10 \
   --label-mode variety_maturity \
   --resize 256 \
   --preprocess-device auto \
@@ -45,8 +45,9 @@ python main.py preprocess \
   --seed 42
 ```
 
-The split logic is group-aware, so obvious filename variants and exact duplicate
-captures stay in the same split instead of leaking across `train/val/test`.
+This creates an 80/10/10 train/validation/test split by default. Exact duplicate
+files stay in the same split, while near-duplicate captures are reported by the
+split audit instead of being forced into large preprocessing groups.
 
 `--preprocess-device auto` uses CUDA for resize preprocessing when a GPU is available.
 Use `--preprocess-device cuda` to require GPU, or `--preprocess-device cpu` to force CPU.
@@ -107,17 +108,42 @@ python main.py train \
   --seed 42
 ```
 
+Train the reduced-augmentation single-head ResNet18 setup for combined
+variety-maturity labels:
+
+```bash
+python main.py train \
+  --prepared-dir data/prepared \
+  --output-dir artifacts/resnet18 \
+  --model-type resnet18 \
+  --epochs 45 \
+  --batch-size 32 \
+  --lr 2e-4 \
+  --weight-decay 1e-3 \
+  --image-size 320 \
+  --noise-std 0 \
+  --blur-prob 0 \
+  --erase-prob 0 \
+  --rotation-degrees 3
+```
+
 During training and testing, resize/crop/flip/color jitter/normalization run on the
 same device as the model. With CUDA available, the repeated per-epoch preprocessing
 uses the GPU instead of your CPU.
 
-For tougher research settings, the training pipeline already enables stronger
-augmentation defaults for ResNet18 and YOLOv8 so performance is less inflated by
-easy samples.
+For research settings, the training pipeline uses conservative augmentation
+defaults. ResNet18 training resizes images to 256 x 256, applies a 224 x 224
+random resized crop with scale `(0.95, 1.0)` and ratio `(0.95, 1.05)`, then uses
+limited horizontal flip, very small rotation, light color jitter, tensor conversion, and
+ImageNet normalization. ResNet18 validation and test preprocessing resize
+directly to 224 x 224 and apply only tensor conversion plus ImageNet
+normalization. YOLOv8 defaults avoid vertical flips, heavy color shifts, heavy
+mosaic, mixup, and perspective distortion.
 
 The training pipeline also now enables:
 - early stopping, so runs stop when validation accuracy stops improving,
 - inverse-frequency class weighting for ResNet18 by default, so weak classes have more influence on the loss,
+- optional balanced ResNet18 batch sampling with `--use-balanced-sampler` for imbalanced-class experiments,
 - metrics logging for these controls in the saved `metrics.json` files.
 
 ### Audit split leakage
@@ -182,8 +208,8 @@ python main.py all \
   --prepared-dir data/prepared \
   --output-dir artifacts/resnet18 \
   --model-type resnet18 \
-  --val-ratio 0.15 \
-  --test-ratio 0.15 \
+  --val-ratio 0.10 \
+  --test-ratio 0.10 \
   --label-mode variety_maturity \
   --resize 256 \
   --preprocess-device auto \
