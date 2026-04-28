@@ -27,27 +27,34 @@ DEFAULT_TRAIN_LR = 5e-4
 DEFAULT_TRAIN_WEIGHT_DECAY = 5e-4
 DEFAULT_EARLY_STOPPING_PATIENCE = 8
 DEFAULT_EARLY_STOPPING_MIN_DELTA = 0.002
-DEFAULT_TRAIN_NOISE_STD = 0.01
-DEFAULT_TRAIN_BLUR_PROB = 0.03
-DEFAULT_TRAIN_ERASE_PROB = 0.02
+DEFAULT_TRAIN_RESIZE_SIZE = 256
+DEFAULT_TRAIN_NOISE_STD = 0.0
+DEFAULT_TRAIN_BLUR_PROB = 0.0
+DEFAULT_TRAIN_ERASE_PROB = 0.0
 DEFAULT_TRAIN_ROTATION_DEGREES = 5.0
-DEFAULT_TRAIN_CROP_SCALE = (0.85, 1.0)
-DEFAULT_TRAIN_CROP_RATIO = (0.85, 1.18)
-DEFAULT_TRAIN_HORIZONTAL_FLIP_PROB = 0.40
-DEFAULT_TRAIN_BRIGHTNESS_RANGE = (0.90, 1.10)
-DEFAULT_TRAIN_CONTRAST_RANGE = (0.90, 1.10)
-DEFAULT_TRAIN_SATURATION_RANGE = (0.90, 1.10)
-DEFAULT_TRAIN_HUE_RANGE = (-0.02, 0.02)
+DEFAULT_TRAIN_CROP_SCALE = (0.90, 1.0)
+DEFAULT_TRAIN_CROP_RATIO = (0.85, 1.15)
+DEFAULT_TRAIN_HORIZONTAL_FLIP_PROB = 0.50
+DEFAULT_TRAIN_BRIGHTNESS_RANGE = (0.88, 1.12)
+DEFAULT_TRAIN_CONTRAST_RANGE = (0.88, 1.12)
+DEFAULT_TRAIN_SATURATION_RANGE = (0.92, 1.08)
+DEFAULT_TRAIN_HUE_RANGE = (-0.01, 0.01)
 DEFAULT_YOLO_AUGMENTATION = {
-    "degrees": 5.0,
-    "translate": 0.04,
-    "scale": 0.10,
-    "fliplr": 0.40,
-    "flipud": 0.0,
-    "hsv_h": 0.005,
+    "hsv_h": 0.003,
     "hsv_s": 0.20,
-    "hsv_v": 0.15,
-    "erasing": 0.05,
+    "hsv_v": 0.18,
+    "degrees": 3.0,
+    "translate": 0.04,
+    "scale": 0.25,
+    "shear": 0.0,
+    "perspective": 0.0,
+    "fliplr": 0.50,
+    "flipud": 0.0,
+    "mosaic": 0.30,
+    "mixup": 0.0,
+    "copy_paste": 0.0,
+    "close_mosaic": 10,
+    "erasing": 0.0,
 }
 DEFAULT_LABEL_SMOOTHING = 0.0
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
@@ -235,24 +242,6 @@ def _resize_tensor(image: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
     ).squeeze(0)
 
 
-def _center_crop_tensor(image: torch.Tensor, crop_size: int) -> torch.Tensor:
-    _, height, width = image.shape
-    top = max((height - crop_size) // 2, 0)
-    left = max((width - crop_size) // 2, 0)
-    return image[:, top : top + crop_size, left : left + crop_size]
-
-
-def _resize_shorter_edge(image: torch.Tensor, size: int) -> torch.Tensor:
-    _, height, width = image.shape
-    if height < width:
-        new_height = size
-        new_width = int(width * size / height)
-    else:
-        new_width = size
-        new_height = int(height * size / width)
-    return _resize_tensor(image, (new_height, new_width))
-
-
 def _apply_gpu_color_jitter(image: torch.Tensor) -> torch.Tensor:
     adjustments = [
         lambda x: TF.adjust_brightness(x, random.uniform(*DEFAULT_TRAIN_BRIGHTNESS_RANGE)),
@@ -321,6 +310,7 @@ def _prepare_images_on_device(
     for image in images:
         image = image.to(device=device, non_blocking=True, dtype=torch.float32).div_(255.0)
         if training:
+            image = _resize_tensor(image, (DEFAULT_TRAIN_RESIZE_SIZE, DEFAULT_TRAIN_RESIZE_SIZE))
             i, j, h, w = transforms.RandomResizedCrop.get_params(
                 image,
                 scale=DEFAULT_TRAIN_CROP_SCALE,
@@ -336,8 +326,7 @@ def _prepare_images_on_device(
             image = _apply_gaussian_noise(image, noise_std)
             image = _apply_random_erasing(image, erase_prob)
         else:
-            image = _resize_shorter_edge(image, int(image_size * 1.15))
-            image = _center_crop_tensor(image, image_size)
+            image = _resize_tensor(image, (image_size, image_size))
 
         processed.append(image)
 
@@ -611,6 +600,10 @@ def _run_resnet18_training(
                 "class_weights": class_weights.detach().cpu().tolist() if class_weights is not None else None,
                 "augmentation": {
                     "augment_validation": False,
+                    "train_resize_size": DEFAULT_TRAIN_RESIZE_SIZE,
+                    "train_crop_size": image_size,
+                    "validation_resize_size": image_size,
+                    "test_resize_size": image_size,
                     "noise_std": noise_std,
                     "blur_prob": blur_prob,
                     "erase_prob": erase_prob,
@@ -808,6 +801,10 @@ def _run_resnet18_training(
         },
         "augmentation": {
             "augment_validation": False,
+            "train_resize_size": DEFAULT_TRAIN_RESIZE_SIZE,
+            "train_crop_size": image_size,
+            "validation_resize_size": image_size,
+            "test_resize_size": image_size,
             "noise_std": noise_std,
             "blur_prob": blur_prob,
             "erase_prob": erase_prob,

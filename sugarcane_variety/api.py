@@ -241,13 +241,10 @@ def _draw_prediction_overlay(
     annotated = image.copy()
     draw = ImageDraw.Draw(annotated, "RGBA")
 
-    crop_image_size = model_image_sizes.get("resnet18") or model_image_sizes.get("yolov8") or 224
-    crop_scale = crop_image_size / int(crop_image_size * 1.15)
-    crop_size = min(annotated.width, annotated.height) * crop_scale
-    left = (annotated.width - crop_size) / 2
-    top = (annotated.height - crop_size) / 2
-    right = left + crop_size
-    bottom = top + crop_size
+    left = 0
+    top = 0
+    right = annotated.width - 1
+    bottom = annotated.height - 1
 
     maturity_status = str(maturity_reason["maturity_status"]).lower()
     if maturity_status == "mature":
@@ -1353,17 +1350,34 @@ def _render_model_doc_section(model_type: str) -> str:
         metrics.get("augmentation", {}) if isinstance(metrics.get("augmentation"), dict) else {},
         [
             ("Validation Augmented", "augment_validation"),
+            ("Train Resize Size", "train_resize_size"),
+            ("Train Crop Size", "train_crop_size"),
+            ("Validation Resize Size", "validation_resize_size"),
+            ("Test Resize Size", "test_resize_size"),
             ("Noise Std", "noise_std"),
             ("Blur Probability", "blur_prob"),
             ("Erase Probability", "erase_prob"),
             ("Rotation Degrees", "rotation_degrees"),
+            ("Crop Scale", "crop_scale"),
+            ("Crop Ratio", "crop_ratio"),
+            ("Horizontal Flip Probability", "horizontal_flip_prob"),
+            ("Brightness Range", "brightness_range"),
+            ("Contrast Range", "contrast_range"),
+            ("Saturation Range", "saturation_range"),
+            ("Hue Range", "hue_range"),
             ("Translate", "translate"),
             ("Scale", "scale"),
+            ("Shear", "shear"),
+            ("Perspective", "perspective"),
             ("Flip Left/Right", "fliplr"),
             ("Flip Up/Down", "flipud"),
             ("HSV Hue", "hsv_h"),
             ("HSV Saturation", "hsv_s"),
             ("HSV Value", "hsv_v"),
+            ("Mosaic", "mosaic"),
+            ("MixUp", "mixup"),
+            ("Copy Paste", "copy_paste"),
+            ("Close Mosaic", "close_mosaic"),
         ],
     )
 
