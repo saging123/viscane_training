@@ -27,20 +27,27 @@ DEFAULT_TRAIN_LR = 5e-4
 DEFAULT_TRAIN_WEIGHT_DECAY = 5e-4
 DEFAULT_EARLY_STOPPING_PATIENCE = 8
 DEFAULT_EARLY_STOPPING_MIN_DELTA = 0.002
-DEFAULT_TRAIN_NOISE_STD = 0.02
-DEFAULT_TRAIN_BLUR_PROB = 0.05
-DEFAULT_TRAIN_ERASE_PROB = 0.05
-DEFAULT_TRAIN_ROTATION_DEGREES = 8.0
+DEFAULT_TRAIN_NOISE_STD = 0.01
+DEFAULT_TRAIN_BLUR_PROB = 0.03
+DEFAULT_TRAIN_ERASE_PROB = 0.02
+DEFAULT_TRAIN_ROTATION_DEGREES = 5.0
+DEFAULT_TRAIN_CROP_SCALE = (0.85, 1.0)
+DEFAULT_TRAIN_CROP_RATIO = (0.85, 1.18)
+DEFAULT_TRAIN_HORIZONTAL_FLIP_PROB = 0.40
+DEFAULT_TRAIN_BRIGHTNESS_RANGE = (0.90, 1.10)
+DEFAULT_TRAIN_CONTRAST_RANGE = (0.90, 1.10)
+DEFAULT_TRAIN_SATURATION_RANGE = (0.90, 1.10)
+DEFAULT_TRAIN_HUE_RANGE = (-0.02, 0.02)
 DEFAULT_YOLO_AUGMENTATION = {
-    "degrees": 8.0,
-    "translate": 0.06,
-    "scale": 0.15,
-    "fliplr": 0.35,
+    "degrees": 5.0,
+    "translate": 0.04,
+    "scale": 0.10,
+    "fliplr": 0.40,
     "flipud": 0.0,
-    "hsv_h": 0.01,
-    "hsv_s": 0.35,
-    "hsv_v": 0.25,
-    "erasing": 0.10,
+    "hsv_h": 0.005,
+    "hsv_s": 0.20,
+    "hsv_v": 0.15,
+    "erasing": 0.05,
 }
 DEFAULT_LABEL_SMOOTHING = 0.0
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
@@ -248,10 +255,10 @@ def _resize_shorter_edge(image: torch.Tensor, size: int) -> torch.Tensor:
 
 def _apply_gpu_color_jitter(image: torch.Tensor) -> torch.Tensor:
     adjustments = [
-        lambda x: TF.adjust_brightness(x, random.uniform(0.8, 1.2)),
-        lambda x: TF.adjust_contrast(x, random.uniform(0.8, 1.2)),
-        lambda x: TF.adjust_saturation(x, random.uniform(0.8, 1.2)),
-        lambda x: TF.adjust_hue(x, random.uniform(-0.05, 0.05)),
+        lambda x: TF.adjust_brightness(x, random.uniform(*DEFAULT_TRAIN_BRIGHTNESS_RANGE)),
+        lambda x: TF.adjust_contrast(x, random.uniform(*DEFAULT_TRAIN_CONTRAST_RANGE)),
+        lambda x: TF.adjust_saturation(x, random.uniform(*DEFAULT_TRAIN_SATURATION_RANGE)),
+        lambda x: TF.adjust_hue(x, random.uniform(*DEFAULT_TRAIN_HUE_RANGE)),
     ]
     random.shuffle(adjustments)
     for adjustment in adjustments:
@@ -316,12 +323,12 @@ def _prepare_images_on_device(
         if training:
             i, j, h, w = transforms.RandomResizedCrop.get_params(
                 image,
-                scale=(0.75, 1.0),
-                ratio=(3.0 / 4.0, 4.0 / 3.0),
+                scale=DEFAULT_TRAIN_CROP_SCALE,
+                ratio=DEFAULT_TRAIN_CROP_RATIO,
             )
             image = image[:, i : i + h, j : j + w]
             image = _resize_tensor(image, (image_size, image_size))
-            if random.random() < 0.5:
+            if random.random() < DEFAULT_TRAIN_HORIZONTAL_FLIP_PROB:
                 image = torch.flip(image, dims=[2])
             image = _apply_random_rotation(image, rotation_degrees)
             image = _apply_gpu_color_jitter(image)
@@ -331,10 +338,6 @@ def _prepare_images_on_device(
         else:
             image = _resize_shorter_edge(image, int(image_size * 1.15))
             image = _center_crop_tensor(image, image_size)
-            if augment_validation:
-                image = _apply_random_rotation(image, rotation_degrees * 0.5)
-                image = _apply_random_blur(image, blur_prob * 0.5)
-                image = _apply_gaussian_noise(image, noise_std * 0.5)
 
         processed.append(image)
 
@@ -607,11 +610,18 @@ def _run_resnet18_training(
                 "device": str(device),
                 "class_weights": class_weights.detach().cpu().tolist() if class_weights is not None else None,
                 "augmentation": {
-                    "augment_validation": augment_validation,
+                    "augment_validation": False,
                     "noise_std": noise_std,
                     "blur_prob": blur_prob,
                     "erase_prob": erase_prob,
                     "rotation_degrees": rotation_degrees,
+                    "crop_scale": DEFAULT_TRAIN_CROP_SCALE,
+                    "crop_ratio": DEFAULT_TRAIN_CROP_RATIO,
+                    "horizontal_flip_prob": DEFAULT_TRAIN_HORIZONTAL_FLIP_PROB,
+                    "brightness_range": DEFAULT_TRAIN_BRIGHTNESS_RANGE,
+                    "contrast_range": DEFAULT_TRAIN_CONTRAST_RANGE,
+                    "saturation_range": DEFAULT_TRAIN_SATURATION_RANGE,
+                    "hue_range": DEFAULT_TRAIN_HUE_RANGE,
                 },
                 "training_controls": {
                     "early_stopping_patience": early_stopping_patience,
@@ -797,11 +807,18 @@ def _run_resnet18_training(
             "freeze_backbone_epochs": freeze_backbone_epochs,
         },
         "augmentation": {
-            "augment_validation": augment_validation,
+            "augment_validation": False,
             "noise_std": noise_std,
             "blur_prob": blur_prob,
             "erase_prob": erase_prob,
             "rotation_degrees": rotation_degrees,
+            "crop_scale": DEFAULT_TRAIN_CROP_SCALE,
+            "crop_ratio": DEFAULT_TRAIN_CROP_RATIO,
+            "horizontal_flip_prob": DEFAULT_TRAIN_HORIZONTAL_FLIP_PROB,
+            "brightness_range": DEFAULT_TRAIN_BRIGHTNESS_RANGE,
+            "contrast_range": DEFAULT_TRAIN_CONTRAST_RANGE,
+            "saturation_range": DEFAULT_TRAIN_SATURATION_RANGE,
+            "hue_range": DEFAULT_TRAIN_HUE_RANGE,
         },
         "epoch_history": epoch_history,
         "android_artifact_path": android_artifact_path,

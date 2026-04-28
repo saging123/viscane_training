@@ -149,7 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--augment-validation",
         action="store_true",
-        help="Apply lighter noise/blur/rotation to validation and test data too.",
+        help="Deprecated compatibility flag; validation and test images are never augmented.",
     )
     train.add_argument(
         "--noise-std",
@@ -252,7 +252,7 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument(
         "--augment-validation",
         action="store_true",
-        help="Apply lighter noise/blur/rotation to validation and test data too.",
+        help="Deprecated compatibility flag; validation and test images are never augmented.",
     )
     all_cmd.add_argument(
         "--noise-std",

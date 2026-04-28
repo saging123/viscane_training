@@ -36,10 +36,10 @@ FREEZE_BACKBONE_EPOCHS = 4
 LABEL_MODE = "variety_maturity"
 MODEL_TYPES = ("resnet18", "yolov8")
 YOLO_WEIGHTS = "yolov8n-cls.pt"
-NOISE_STD = 0.02
-BLUR_PROB = 0.05
-ERASE_PROB = 0.05
-ROTATION_DEGREES = 8.0
+NOISE_STD = 0.01
+BLUR_PROB = 0.03
+ERASE_PROB = 0.02
+ROTATION_DEGREES = 5.0
 
 
 def _json_safe(value: Any) -> Any:
